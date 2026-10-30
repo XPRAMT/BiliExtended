@@ -49,18 +49,27 @@ constexpr std::array<uint32_t, kRefreshLoopInstructionCount> kExpectedVpDuration
         0xfc1e0fe8, 0xf90007fe, 0xa9014ff4, 0x2f00e408};
 constexpr std::array<uint32_t, kRefreshLoopInstructionCount> kExpectedQueuePicturePrologue = {
         0x6db923e9, 0xa9017bfd, 0xa9026ffc, 0xa90367fa};
-// Bilibili 9.13.0 arm64 libijkplayer.so, GNU build-id d64b356c9dfa1ce7235aa13186d71c50.
-// This profile deliberately installs GOT-only hooks; none of the 9.5.0 structure offsets
-// or inline trampolines may be used with it.
-constexpr std::array<uint8_t, 16> kIjk913BuildId = {
-        0xd6, 0x4b, 0x35, 0x6c, 0x9d, 0xfa, 0x1c, 0xe7,
-        0x23, 0x5a, 0xa1, 0x31, 0x86, 0xd7, 0x1c, 0x50};
-constexpr std::array<uint32_t, 4> kIjk913ComputePrologue = {
-        0xfc1b0fec, 0x6d012beb, 0x6d0223e9, 0xa90357fe};
-constexpr std::array<uint32_t, 4> kIjk913WaitPrologue = {
-        0xf81e0ffe, 0xa9014ff4, 0x340000e2, 0xb9470808};
-constexpr std::array<uint32_t, 4> kIjk913DropPrologue = {
-        0xfc1b0fea, 0x6d00a3e9, 0xf9000ffe, 0xa9025ff8};
+// Signature-scanned GOT-only profile (Bilibili 9.13.0 and later arm64 libijkplayer.so).
+// No fixed offsets or build-ids: each function is found through its exported dynsym entry
+// and the JUMP_SLOT that points back at it, then accepted only when the symbol size and the
+// first eight instructions match the template below. The templates were taken from 9.13.0
+// (build-id d64b356c...) and are byte-identical in 9.17.0 (build-id dff1a23b...); only
+// call targets and VideoState field offsets moved, which this profile never reads.
+// None of the 9.5.0 structure offsets or inline trampolines may be used with it.
+struct IjkFunctionSignature {
+    const char* name;
+    Elf64_Xword size;
+    std::array<uint32_t, 8> prologue;
+};
+constexpr IjkFunctionSignature kIjkComputeSignature = {"compute_target_delay", 512,
+        {0xfc1b0fec, 0x6d012beb, 0x6d0223e9, 0xa90357fe,
+         0xa9044ff4, 0xaa0003f3, 0xaa0103e0, 0xaa0103f4}};
+constexpr IjkFunctionSignature kIjkWaitSignature = {"frame_queue_wait_timeout", 100,
+        {0xf81e0ffe, 0xa9014ff4, 0x340000e2, 0xb9470808,
+         0xb9471409, 0x710fa03f, 0xaa0003f3, 0x7a49a100}};
+constexpr IjkFunctionSignature kIjkDropSignature = {"is_need_drop_frame", 404,
+        {0xfc1b0fea, 0x6d00a3e9, 0xf9000ffe, 0xa9025ff8,
+         0xa90357f6, 0xa9044ff4, 0xb940a828, 0xf9400436}};
 constexpr uint32_t kArm64LdrX17Literal8 = 0x58000051;
 constexpr uint32_t kArm64BranchX17 = 0xd61f0220;
 constexpr size_t kFrameSerialOffset = 0x28;
@@ -128,7 +137,7 @@ size_t gRawSampleCount = 0;
 size_t gIjkEarlyUsStart = 0;
 size_t gIjkEarlyUsCount = 0;
 std::atomic<bool> gRawSampleWriterStarted = false;
-std::atomic<bool> gIjk913GotOnlyProfile = false;
+std::atomic<bool> gIjkSignatureGotOnlyProfile = false;
 std::atomic<uint64_t> gSuccessfulEglSwaps = 0;
 std::atomic<bool> gProducerSamplerStarted = false;
 std::atomic<int64_t> gLatestQueuePicturePtsNanos = -1;
@@ -1026,10 +1035,10 @@ std::array<uint32_t, kRefreshLoopInstructionCount> build4msInstructions() {
 struct LibrarySearch {
     uintptr_t base = 0;
     std::string name;
-    bool ijk913BuildId = false;
+    std::string buildId;
 };
 
-bool hasIjk913BuildId(const dl_phdr_info* info) {
+std::string gnuBuildIdHex(const dl_phdr_info* info) {
     for (Elf64_Half index = 0; index < info->dlpi_phnum; ++index) {
         const Elf64_Phdr& header = info->dlpi_phdr[index];
         if (header.p_type != PT_NOTE) continue;
@@ -1044,16 +1053,20 @@ bool hasIjk913BuildId(const dl_phdr_info* info) {
             const size_t dataBytes = (static_cast<size_t>(note.n_descsz) + 3U) & ~size_t(3U);
             if (nameBytes > length - position || dataBytes > length - position - nameBytes) break;
             if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4
-                    && note.n_descsz == kIjk913BuildId.size()
-                    && std::memcmp(bytes + position, "GNU", 4) == 0
-                    && std::memcmp(bytes + position + nameBytes, kIjk913BuildId.data(),
-                            kIjk913BuildId.size()) == 0) {
-                return true;
+                    && std::memcmp(bytes + position, "GNU", 4) == 0) {
+                static constexpr char kHex[] = "0123456789abcdef";
+                std::string hex;
+                const uint8_t* id = bytes + position + nameBytes;
+                for (size_t i = 0; i < note.n_descsz; ++i) {
+                    hex.push_back(kHex[id[i] >> 4U]);
+                    hex.push_back(kHex[id[i] & 0xfU]);
+                }
+                return hex;
             }
             position += nameBytes + dataBytes;
         }
     }
-    return false;
+    return "unknown";
 }
 
 int locateIjkPlayer(struct dl_phdr_info* info, size_t, void* data) {
@@ -1063,28 +1076,8 @@ int locateIjkPlayer(struct dl_phdr_info* info, size_t, void* data) {
     }
     search->base = static_cast<uintptr_t>(info->dlpi_addr);
     search->name = info->dlpi_name;
-    search->ijk913BuildId = hasIjk913BuildId(info);
+    search->buildId = gnuBuildIdHex(info);
     return 1;
-}
-
-bool ijk913InstructionsMatch(uintptr_t base) {
-    const struct Entry {
-        uintptr_t offset;
-        const std::array<uint32_t, 4>* expected;
-    } entries[] = {
-            {0x456cc, &kIjk913ComputePrologue},
-            {0x478a8, &kIjk913WaitPrologue},
-            {0x4a740, &kIjk913DropPrologue},
-    };
-    for (const Entry& entry : entries) {
-        for (size_t index = 0; index < entry.expected->size(); ++index) {
-            uint32_t instruction = 0;
-            std::memcpy(&instruction,
-                    reinterpret_cast<const void*>(base + entry.offset + index * 4U), 4);
-            if (instruction != (*entry.expected)[index]) return false;
-        }
-    }
-    return true;
 }
 
 using InstructionPointers =
@@ -2727,7 +2720,7 @@ extern "C" double observedComputeTargetDelay(void* player, void* state, double i
     // compute_target_delay invocation.
     const uint64_t masterClockSampleOrdinal = gMasterClockSampleCalls.fetch_add(
             1, std::memory_order_relaxed);
-    if (!gIjk913GotOnlyProfile.load(std::memory_order_acquire)
+    if (!gIjkSignatureGotOnlyProfile.load(std::memory_order_acquire)
             && (masterClockSampleOrdinal & 7U) == 0U) {
         const double masterClock = readMasterClock(state);
         if (std::isfinite(masterClock) && masterClock >= 0.0) {
@@ -2772,7 +2765,7 @@ extern "C" double observedComputeTargetDelay(void* player, void* state, double i
         if (ratio >= 1.9 && ratio <= 2.1) {
             gDoubledTargetDelays.fetch_add(1, std::memory_order_relaxed);
         }
-        if (!gIjk913GotOnlyProfile.load(std::memory_order_acquire)
+        if (!gIjkSignatureGotOnlyProfile.load(std::memory_order_acquire)
                 && (originalDelayNanos >= kSmallStutter10Nanos
                         || (ratio >= 1.9 && ratio <= 2.1))) {
             const double masterClock = readMasterClock(state);
@@ -3384,7 +3377,7 @@ extern "C" int observedIsNeedDropFrame(int64_t pts, void* player, void* decoder,
         // 120 fps source is 240 frames/s); blocking drops here would leave the video behind.
         return original(pts, player, decoder, forceDrop);
     }
-    if (gIjk913GotOnlyProfile.load(std::memory_order_acquire)) {
+    if (gIjkSignatureGotOnlyProfile.load(std::memory_order_acquire)) {
         // The 9.5.0 earlyUs fields have not been validated against 9.13.0.
         // Only the ABI-confirmed return-value experiment is safe in this profile.
         if (gBlockIjkFrameDrop.load(std::memory_order_acquire)) {
@@ -3451,13 +3444,14 @@ extern "C" int observedIsNeedDropFrame(int64_t pts, void* player, void* decoder,
 struct RefreshTelemetryHookSearch {
     size_t matchedSlots = 0;
     std::string error;
-    bool collectIjk913 = false;
+    bool collectSignature = false;
     struct PendingGotHook {
         void** slot;
         void* replacement;
         void* original;
     };
     std::vector<PendingGotHook> pending;
+    std::vector<std::string> offsets;
 };
 
 bool hookRefreshTelemetryImports(const dl_phdr_info* info, RefreshTelemetryHookSearch* search) {
@@ -3553,20 +3547,47 @@ bool hookRefreshTelemetryImports(const dl_phdr_info* info, RefreshTelemetryHookS
         } else {
             continue;
         }
-        if (search->collectIjk913 && hookKind != HookKind::kComputeTargetDelay
+        if (search->collectSignature && hookKind != HookKind::kComputeTargetDelay
                 && hookKind != HookKind::kFrameQueueWaitTimeout
                 && hookKind != HookKind::kIsNeedDropFrame) {
             continue;
         }
         auto** slot = reinterpret_cast<void**>(base + relocation.r_offset);
-        if (search->collectIjk913) {
-            const uintptr_t expected = base + (hookKind == HookKind::kComputeTargetDelay
-                    ? 0x456cc : hookKind == HookKind::kFrameQueueWaitTimeout
-                            ? 0x478a8 : 0x4a740);
-            if (reinterpret_cast<uintptr_t>(*slot) != expected) {
-                search->error = "IJK 9.13.0 GOT target differs from verified function";
+        if (search->collectSignature) {
+            const IjkFunctionSignature& signature = hookKind == HookKind::kComputeTargetDelay
+                    ? kIjkComputeSignature : hookKind == HookKind::kFrameQueueWaitTimeout
+                            ? kIjkWaitSignature : kIjkDropSignature;
+            const Elf64_Sym& definition = symbols[ELF64_R_SYM(relocation.r_info)];
+            if (definition.st_value == 0 || ELF64_ST_TYPE(definition.st_info) != STT_FUNC) {
+                search->error = std::string("IJK signature: ") + signature.name
+                        + " is not defined in libijkplayer.so";
                 return false;
             }
+            if (definition.st_size != signature.size) {
+                search->error = std::string("IJK signature: ") + signature.name + " size="
+                        + std::to_string(definition.st_size) + " expected="
+                        + std::to_string(signature.size);
+                return false;
+            }
+            const uintptr_t expected = base + static_cast<uintptr_t>(definition.st_value);
+            if (reinterpret_cast<uintptr_t>(*slot) != expected) {
+                search->error = std::string("IJK signature: ") + signature.name
+                        + " GOT target is not the library's own definition";
+                return false;
+            }
+            for (size_t word = 0; word < signature.prologue.size(); ++word) {
+                uint32_t instruction = 0;
+                std::memcpy(&instruction, reinterpret_cast<const void*>(expected + word * 4U), 4);
+                if (instruction != signature.prologue[word]) {
+                    char detail[96];
+                    std::snprintf(detail, sizeof(detail), " prologue word %zu=%08x expected %08x",
+                            word, instruction, signature.prologue[word]);
+                    search->error = std::string("IJK signature: ") + signature.name + detail;
+                    return false;
+                }
+            }
+            search->offsets.push_back(std::string(signature.name) + "@0x"
+                    + [](uintptr_t v) { char b[24]; std::snprintf(b, sizeof(b), "%zx", static_cast<size_t>(v)); return std::string(b); }(definition.st_value));
             search->pending.push_back({slot, replacement, *slot});
             ++search->matchedSlots;
             continue;
@@ -3632,18 +3653,20 @@ std::string startRefreshTelemetry(const std::string& rawSamplePath) {
     if (binary.base == 0) {
         return "IJK refresh telemetry skipped: libijkplayer.so not loaded";
     }
-    if (binary.ijk913BuildId) {
-        if (!ijk913InstructionsMatch(binary.base)) {
-            return "IJK refresh telemetry skipped: 9.13.0 instruction signature mismatch";
-        }
+    std::string signatureFailure;
+    {
         RefreshTelemetryHookSearch search;
-        search.collectIjk913 = true;
+        search.collectSignature = true;
         dl_iterate_phdr(installRefreshTelemetryHook, &search);
-        if (!search.error.empty()) return "IJK refresh telemetry skipped: " + search.error;
-        if (search.pending.size() != 3) {
-            return "IJK refresh telemetry skipped: 9.13.0 expected three verified GOT slots, found="
+        if (!search.error.empty()) {
+            signatureFailure = search.error;
+        } else if (search.pending.size() != 3) {
+            signatureFailure = "expected three signature-verified GOT slots, found="
                     + std::to_string(search.pending.size());
         }
+        if (signatureFailure.empty()) {
+            std::string located;
+            for (const auto& entry : search.offsets) located += (located.empty() ? "" : ",") + entry;
         for (const auto& pending : search.pending) {
             if (pending.replacement == reinterpret_cast<void*>(observedComputeTargetDelay)) {
                 gOriginalComputeTargetDelay.store(
@@ -3656,7 +3679,7 @@ std::string startRefreshTelemetry(const std::string& rawSamplePath) {
                         reinterpret_cast<IsNeedDropFrame>(pending.original));
             }
         }
-        gIjk913GotOnlyProfile.store(true, std::memory_order_release);
+        gIjkSignatureGotOnlyProfile.store(true, std::memory_order_release);
         for (const auto& pending : search.pending) {
             std::string error;
             if (!replaceGotSlot(pending.slot, pending.replacement, nullptr, &error)) {
@@ -3667,22 +3690,26 @@ std::string startRefreshTelemetry(const std::string& rawSamplePath) {
                         rollbackOk = false;
                     }
                 }
-                return "IJK refresh telemetry skipped: 9.13.0 GOT install failed: " + error
+                return "IJK refresh telemetry skipped: signature GOT install failed: " + error
                         + (rollbackOk ? "; rolled back" : "; rollback incomplete");
             }
         }
         const bool rawSamplesActive = startRawSampleWriter(rawSamplePath);
         gRefreshTelemetryStarted.store(true, std::memory_order_release);
-        logInfo("IJK 9.13.0 GOT-only telemetry active: compute_target_delay, "
-                "frame_queue_wait_timeout, is_need_drop_frame; old struct/inline probes disabled");
-        return "IJK refresh telemetry active; profile=9.13.0-got-only rawSamples="
+        logInfo("IJK signature GOT-only telemetry active: buildId=" + binary.buildId + " "
+                + located + "; old struct/inline probes disabled");
+        return "IJK refresh telemetry active; profile=signature-got-only buildId="
+                + binary.buildId + " " + located + " rawSamples="
                 + std::string(rawSamplesActive ? "active" : "unavailable");
+        }
     }
     if (!instructionsMatch(vpDurationInstructionPointers(binary.base),
             kExpectedVpDurationPrologue)
             || !instructionsMatch(queuePictureInstructionPointers(binary.base),
                     kExpectedQueuePicturePrologue)) {
-        return "IJK refresh telemetry skipped: unsupported IJK binary probe signature";
+        return "IJK refresh telemetry skipped: buildId=" + binary.buildId
+                + " signature scan failed (" + signatureFailure
+                + ") and legacy 9.5.0 probe signature does not match; Java features unaffected";
     }
     RefreshTelemetryHookSearch search;
     dl_iterate_phdr(installRefreshTelemetryHook, &search);

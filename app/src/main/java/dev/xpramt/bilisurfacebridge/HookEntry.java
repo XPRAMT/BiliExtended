@@ -45,13 +45,31 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final String IJK_SERVICE_PROCESS = "tv.danmaku.bili:ijkservice";
     private static final String FACTORY =
             "tv.danmaku.biliplayerimpl.render.DefaultVideoRenderLayerFactory";
-    private static final String FACTORY_913 = "Wr1.a";
     private static final String RENDER_CONTAINER =
             "tv.danmaku.biliplayerimpl.render.RenderContainerService";
-    private static final String RENDER_CONTAINER_913 = "Wr1.r";
     private static final String PLAYER_CONTAINER =
             "tv.danmaku.biliplayerimpl.PlayerContainerImpl";
-    private static final String PLAYER_CONTAINER_913 = "Rr1.i";
+    // Obfuscated names are only hints, tried first so hooks exist before the first player is
+    // bound; every hint is checked against the stable superclass/interface shape, and the
+    // runtime PlayerContainer discovery below covers versions with unknown names.
+    private static final String[] FACTORY_HINTS = {"xy1.a", "Wr1.a"}; // 9.17.0, 9.13.0
+    private static final String[] RENDER_CONTAINER_HINTS = {"xy1.q", "Wr1.r"};
+    private static final String[] CONTROL_CONTAINER_HINTS = {
+            "tv.danmaku.biliplayerimpl.controlcontainer.i",
+            "tv.danmaku.biliplayerimpl.controlcontainer.f"};
+    private static final String VIDEO_RENDER_LAYER_FACTORY =
+            "tv.danmaku.render.core.VideoRenderLayerFactory";
+    private static final String ABSTRACT_PLAYER_CONTAINER =
+            "tv.danmaku.biliplayerv2.PlayerContainer";
+    private static final String RENDER_CONTAINER_SERVICE_INTERFACE =
+            "tv.danmaku.biliplayerv2.service.IRenderContainerService";
+    private static final String CONTROL_CONTAINER_SERVICE_INTERFACE =
+            "tv.danmaku.biliplayerv2.service.IControlContainerService";
+    private static final String BIND_PLAYER_CONTAINER_PREFIX = "bindPlayerContainer$";
+    private static final Set<String> HOOKED_CLASSES =
+            Collections.synchronizedSet(new HashSet<String>());
+    private static final Map<Object, Boolean> ATTACHED_LAYERS =
+            Collections.synchronizedMap(new WeakHashMap<Object, Boolean>());
     private static final String RENDER_LAYER = "tv.danmaku.render.core.IVideoRenderLayer";
     private static final String RENDER_TYPE = "tv.danmaku.render.core.IVideoRenderLayer$Type";
     private static final String VIDEO_DETAIL_ACTIVITY =
@@ -64,8 +82,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<Object, WeakReference<Activity>>());
     private static final String CONTROL_CONTAINER_SERVICE =
             "tv.danmaku.biliplayerimpl.controlcontainer.ControlContainerService";
-    private static final String CONTROL_CONTAINER_SERVICE_913 =
-            "tv.danmaku.biliplayerimpl.controlcontainer.f";
     private static final String IJK_SERVICE =
             "tv.danmaku.ijk.media.player.services.IjkMediaPlayerService";
     private static final String IJK_PLAYER = "tv.danmaku.ijk.media.player.IjkMediaPlayer";
@@ -364,30 +380,73 @@ public final class HookEntry implements IXposedHookLoadPackage {
         return new File(directory, "refresh_samples.csv").getAbsolutePath();
     }
 
+    private static Class<?> hintedClass(ClassLoader classLoader, String[] hints, String parent) {
+        Class<?> parentClass = XposedHelpers.findClassIfExists(parent, classLoader);
+        if (parentClass == null) {
+            return null;
+        }
+        for (String hint : hints) {
+            Class<?> candidate = XposedHelpers.findClassIfExists(hint, classLoader);
+            if (candidate != null && parentClass.isAssignableFrom(candidate)
+                    && !candidate.isInterface()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
     private void hookFactory(ClassLoader classLoader) {
         try {
-            Class<?> factoryClass = XposedHelpers.findClassIfExists(FACTORY, classLoader);
-            boolean modern = factoryClass == null;
-            if (modern) {
-                factoryClass = XposedHelpers.findClass(FACTORY_913, classLoader);
+            Class<?> legacy = XposedHelpers.findClassIfExists(FACTORY, classLoader);
+            if (legacy != null) {
+                hookFactoryClass(legacy, "b", classLoader);
+                return;
             }
+            Class<?> hinted = hintedClass(classLoader, FACTORY_HINTS, VIDEO_RENDER_LAYER_FACTORY);
+            if (hinted != null) {
+                hookFactoryClass(hinted, "onCreate", classLoader);
+            } else {
+                log("video render factory name hint not found; waiting for runtime discovery");
+            }
+            // Any other concrete factory is hooked the first time one is constructed.
+            Class<?> base = XposedHelpers.findClass(VIDEO_RENDER_LAYER_FACTORY, classLoader);
+            XposedBridge.hookAllConstructors(base, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Class<?> concrete = param.thisObject.getClass();
+                    if (concrete.getName().startsWith("com.bilibili.bililive.")) {
+                        return;
+                    }
+                    hookFactoryClass(concrete, "onCreate", concrete.getClassLoader());
+                }
+            });
+        } catch (Throwable throwable) {
+            log("factory hook unavailable: " + throwable.getClass().getSimpleName());
+        }
+    }
+
+    private void hookFactoryClass(Class<?> factoryClass, String methodName, ClassLoader classLoader) {
+        if (!HOOKED_CLASSES.add("factory:" + factoryClass.getName())) {
+            return;
+        }
+        try {
             final Class<?> typeClass = XposedHelpers.findClass(RENDER_TYPE, classLoader);
-            XposedHelpers.findAndHookMethod(factoryClass, modern ? "onCreate" : "b",
+            XposedHelpers.findAndHookMethod(factoryClass, methodName,
                     typeClass, new XC_MethodHook() {
                 @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        Object requestedType = param.args[0];
-                        Object configuredType = configuredRendererType(param.thisObject);
-                        // The offline-cache player lives in UnitedPlaylistActivity and uses
-                        // the same factory, so the renderer choice applies to both pages.
-                        String context = factoryContext(param.thisObject);
-                        if (PlaybackActivityScope.isVideoDetailActivity(context)
-                                || PlaybackActivityScope.isVideoPlaylistActivity(context)) {
-                            ModulePreferences.RendererMode mode =
-                                    ModulePreferences.loadVideoDetailRendererModeForHook();
-                            if (ModulePreferences.loadMinimalMedia3PlayerForHook()) {
-                                mode = ModulePreferences.RendererMode.SURFACE;
-                            }
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    Object requestedType = param.args[0];
+                    Object configuredType = configuredRendererType(param.thisObject);
+                    // The offline-cache player lives in UnitedPlaylistActivity and uses
+                    // the same factory, so the renderer choice applies to both pages.
+                    String context = factoryContext(param.thisObject);
+                    if (PlaybackActivityScope.isVideoDetailActivity(context)
+                            || PlaybackActivityScope.isVideoPlaylistActivity(context)) {
+                        ModulePreferences.RendererMode mode =
+                                ModulePreferences.loadVideoDetailRendererModeForHook();
+                        if (ModulePreferences.loadMinimalMedia3PlayerForHook()) {
+                            mode = ModulePreferences.RendererMode.SURFACE;
+                        }
                         Object selectedRenderer = XposedHelpers.getStaticObjectField(
                                 typeClass, mode.bilibiliTypeField);
                         param.args[0] = selectedRenderer;
@@ -397,92 +456,272 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                         + " configured=" + configuredType);
                     } else {
                         logOnce("factory:" + String.valueOf(requestedType) + ':'
-                                        + String.valueOf(configuredType),
+                                        + String.valueOf(configuredType) + ':' + context,
                                 "kept Bilibili renderer request=" + requestedType
-                                        + ", configured=" + configuredType);
+                                        + ", configured=" + configuredType
+                                        + ", context=" + context);
                     }
                 }
 
                 @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            Object layer = param.getResult();
-                            reportLayer("factory", layer);
-                            attachDebugOverlayForPlayback(param.thisObject, layer);
-                            if (SURFACE_FRAME_RATE_VOTE && layer != null
-                                    && isVideoPlaybackActivity(factoryContext(param.thisObject))) {
-                                voteSurfaceFrameRate(layer);
-                            }
-                        }
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Object layer = param.getResult();
+                    reportLayer("factory", layer);
+                    attachDebugOverlayForPlayback(param.thisObject, layer);
+                    if (SURFACE_FRAME_RATE_VOTE && layer != null
+                            && isVideoPlaybackActivity(factoryContext(param.thisObject))) {
+                        voteSurfaceFrameRate(layer);
+                    }
+                }
             });
             log("hooked video render factory=" + factoryClass.getName());
         } catch (Throwable throwable) {
-            log("factory hook unavailable: " + throwable.getClass().getSimpleName());
+            HOOKED_CLASSES.remove("factory:" + factoryClass.getName());
+            log("factory hook unavailable class=" + factoryClass.getName() + ": "
+                    + throwable.getClass().getSimpleName());
         }
     }
 
-    private void hookRenderContainer(ClassLoader classLoader) {
+    private void hookRenderContainer(final ClassLoader classLoader) {
         try {
-            Class<?> containerClass = XposedHelpers.findClassIfExists(RENDER_CONTAINER, classLoader);
-            boolean modern = containerClass == null;
-            if (modern) {
-                containerClass = XposedHelpers.findClass(RENDER_CONTAINER_913, classLoader);
+            Class<?> legacy = XposedHelpers.findClassIfExists(RENDER_CONTAINER, classLoader);
+            if (legacy != null) {
+                hookRenderContainerClass(legacy, classLoader);
+            } else {
+                Class<?> hinted = hintedClass(classLoader, RENDER_CONTAINER_HINTS,
+                        RENDER_CONTAINER_SERVICE_INTERFACE);
+                if (hinted != null) {
+                    hookRenderContainerClass(hinted, classLoader);
+                } else {
+                    log("render container name hint not found; waiting for runtime discovery");
+                }
             }
-            Class<?> layerClass = XposedHelpers.findClass(RENDER_LAYER, classLoader);
-            Class<?> playerContainerClass = XposedHelpers.findClass(
-                    modern ? PLAYER_CONTAINER_913 : PLAYER_CONTAINER, classLoader);
-            final String contextField = modern ? "b" : "c";
-            XposedHelpers.findAndHookMethod(containerClass, modern ? "e" : "M7",
-                    layerClass, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    reportLayer("attached", param.args[0]);
-                    if (ModulePreferences.loadMedia3FrameSyncForHook()) {
-                        PipelineThreadBoost.scheduleRenderThreadBoost();
-                        AppVsyncRelay.start();
+            hookPlayerContainerDiscovery(classLoader);
+        } catch (Throwable throwable) {
+            log("render-container hook unavailable: " + throwable.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Version-independent discovery: every player is a subclass of the unobfuscated
+     * {@code tv.danmaku.biliplayerv2.PlayerContainer}, whose public getters return the render
+     * and control container services. Their concrete classes are hooked when first seen, and
+     * the factory context is recorded directly, so a renamed obfuscated class still works.
+     */
+    private void hookPlayerContainerDiscovery(final ClassLoader classLoader) {
+        Class<?> base = XposedHelpers.findClassIfExists(ABSTRACT_PLAYER_CONTAINER, classLoader);
+        if (base == null) {
+            log("PlayerContainer discovery unavailable: class missing");
+            return;
+        }
+        XposedBridge.hookAllConstructors(base, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                final Class<?> concrete = param.thisObject.getClass();
+                if (!HOOKED_CLASSES.add("player-container:" + concrete.getName())) {
+                    return;
+                }
+                try {
+                    int hooked = XposedBridge.hookAllMethods(concrete, "onCreate", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam createParam) {
+                            discoverPlayerServices(createParam.thisObject, classLoader);
+                        }
+                    }).size();
+                    log("hooked player container discovery class=" + concrete.getName()
+                            + " onCreate=" + hooked);
+                } catch (Throwable throwable) {
+                    log("player container discovery hook failed: "
+                            + throwable.getClass().getSimpleName());
+                }
+            }
+        });
+    }
+
+    private void discoverPlayerServices(Object playerContainer, ClassLoader classLoader) {
+        Object renderService = null;
+        Object controlService = null;
+        try {
+            renderService = XposedHelpers.callMethod(playerContainer, "getRenderContainerService");
+        } catch (Throwable ignored) {
+            // Reported below as missing.
+        }
+        try {
+            controlService = XposedHelpers.callMethod(playerContainer, "getControlContainerService");
+        } catch (Throwable ignored) {
+            // Reported below as missing.
+        }
+        if (renderService != null) {
+            hookRenderContainerClass(renderService.getClass(), classLoader);
+            recordFactoryContext(renderService, playerContainer);
+        }
+        if (controlService != null) {
+            hookControlContainerClass(controlService.getClass());
+        }
+        logOnce("player-services:" + playerContainer.getClass().getName(),
+                "player services discovered container=" + playerContainer.getClass().getName()
+                        + " render=" + (renderService == null ? "missing"
+                                : renderService.getClass().getName())
+                        + " control=" + (controlService == null ? "missing"
+                                : controlService.getClass().getName()));
+    }
+
+    private static Object fieldOfType(Object owner, String typeName) {
+        for (Class<?> type = owner.getClass(); type != null && type != Object.class;
+                type = type.getSuperclass()) {
+            for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+                Class<?> fieldType = field.getType();
+                if (fieldType.isPrimitive()) {
+                    continue;
+                }
+                if (isAssignableToName(fieldType, typeName)) {
+                    try {
+                        field.setAccessible(true);
+                        Object value = field.get(owner);
+                        if (value != null) {
+                            return value;
+                        }
+                    } catch (Throwable ignored) {
+                        // Try the next matching field.
                     }
                 }
-            });
-            XposedHelpers.findAndHookMethod(containerClass,
-                    "bindPlayerContainer$srcs_legacy_andruid_common_player_biliplayerimpl_biliplayerimpl_base",
-                    playerContainerClass, new XC_MethodHook() {
+            }
+        }
+        return null;
+    }
+
+    private static boolean isAssignableToName(Class<?> type, String name) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            if (current.getName().equals(name)) {
+                return true;
+            }
+            for (Class<?> iface : current.getInterfaces()) {
+                if (isAssignableToName(iface, name)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private Context playerContainerContext(Object playerContainer) {
+        if (playerContainer == null) {
+            return null;
+        }
+        try {
+            Object context = XposedHelpers.callMethod(playerContainer, "getContext");
+            if (context instanceof Context) {
+                return (Context) context;
+            }
+        } catch (Throwable ignored) {
+            // Fall back to a Context-typed field.
+        }
+        Object context = fieldOfType(playerContainer, Context.class.getName());
+        return context instanceof Context ? (Context) context : null;
+    }
+
+    private void recordFactoryContext(Object renderService, Object playerContainer) {
+        Object factory = fieldOfType(renderService, VIDEO_RENDER_LAYER_FACTORY);
+        Context context = playerContainerContext(playerContainer);
+        if (factory == null || context == null) {
+            return;
+        }
+        String contextName = context.getClass().getName();
+        FACTORY_CONTEXTS.put(factory, contextName);
+        Activity activity = activityFromContext(context);
+        if (activity != null) {
+            FACTORY_ACTIVITIES.put(factory, new WeakReference<Activity>(activity));
+        }
+        if (!contextName.startsWith("com.bilibili.bililive.")) {
+            hookFactoryClass(factory.getClass(), "onCreate", factory.getClass().getClassLoader());
+        }
+        logOnce("factory-context:" + contextName, "player factory context=" + contextName);
+    }
+
+    private void hookRenderContainerClass(Class<?> containerClass, ClassLoader classLoader) {
+        if (!HOOKED_CLASSES.add("render-container:" + containerClass.getName())) {
+            return;
+        }
+        try {
+            Class<?> layerClass = XposedHelpers.findClass(RENDER_LAYER, classLoader);
+            int layerMethods = 0;
+            int bindMethods = 0;
+            for (java.lang.reflect.Method method : containerClass.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if (java.lang.reflect.Modifier.isStatic(method.getModifiers())
+                        || parameters.length != 1) {
+                    continue;
+                }
+                if (method.getReturnType() == void.class && parameters[0] == layerClass) {
+                    // The attach method's name is obfuscated and shares this shape with the
+                    // detach/replace methods; a layer counts as attached once its view has a
+                    // parent after the call, and is reported once per layer instance.
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            Object layer = param.args[0];
+                            if (layer == null || param.hasThrowable()) {
+                                return;
+                            }
+                            try {
+                                Object view = XposedHelpers.callMethod(layer, "getView");
+                                if (!(view instanceof View) || ((View) view).getParent() == null) {
+                                    return;
+                                }
+                            } catch (Throwable ignored) {
+                                return;
+                            }
+                            if (ATTACHED_LAYERS.put(layer, Boolean.TRUE) != null) {
+                                return;
+                            }
+                            reportLayer("attached", layer);
+                            if (ModulePreferences.loadMedia3FrameSyncForHook()) {
+                                PipelineThreadBoost.scheduleRenderThreadBoost();
+                                AppVsyncRelay.start();
+                            }
+                        }
+                    });
+                    layerMethods++;
+                } else if (method.getName().startsWith(BIND_PLAYER_CONTAINER_PREFIX)) {
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             try {
-                                Object factory = XposedHelpers.getObjectField(param.thisObject, "s");
-                                Object context = XposedHelpers.getObjectField(
-                                        param.args[0], contextField);
-                                if (factory != null && context instanceof Context) {
-                                    String contextName = context.getClass().getName();
-                                    FACTORY_CONTEXTS.put(factory, contextName);
-                                    Activity activity = activityFromContext((Context) context);
-                                    if (activity != null) {
-                                        FACTORY_ACTIVITIES.put(factory,
-                                                new WeakReference<Activity>(activity));
-                                    }
-                                    logOnce("factory-context:" + contextName,
-                                            "player factory context=" + contextName);
-                                }
+                                recordFactoryContext(param.thisObject, param.args[0]);
                             } catch (Throwable throwable) {
                                 log("player-container context unavailable: "
                                         + throwable.getClass().getSimpleName());
                             }
                         }
                     });
-            log("hooked video render container=" + containerClass.getName());
+                    bindMethods++;
+                }
+            }
+            log("hooked video render container=" + containerClass.getName()
+                    + " layerMethods=" + layerMethods + " bindMethods=" + bindMethods);
         } catch (Throwable throwable) {
-            log("render-container hook unavailable: " + throwable.getClass().getSimpleName());
+            HOOKED_CLASSES.remove("render-container:" + containerClass.getName());
+            log("render-container hook unavailable class=" + containerClass.getName() + ": "
+                    + throwable.getClass().getSimpleName());
         }
     }
 
     private Object configuredRendererType(Object factory) {
         try {
-            Object playerParams = XposedHelpers.getObjectField(factory, "a");
-            if (FACTORY_913.equals(factory.getClass().getName())) {
+            Object playerParams = fieldOfType(factory, "tv.danmaku.biliplayerv2.PlayerParamsV2");
+            if (playerParams == null) {
+                playerParams = XposedHelpers.getObjectField(factory, "a");
+            }
+            try {
                 Object config = XposedHelpers.callMethod(playerParams, "getConfig");
                 return XposedHelpers.callMethod(config, "getVideoRenderLayerType");
+            } catch (Throwable ignored) {
+                Object configuration = XposedHelpers.getObjectField(playerParams, "c");
+                return XposedHelpers.getObjectField(configuration, "l");
             }
-            Object configuration = XposedHelpers.getObjectField(playerParams, "c");
-            return XposedHelpers.getObjectField(configuration, "l");
         } catch (Throwable ignored) {
             return null;
         }
@@ -654,13 +893,27 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (!REPORTED.add("control-container-service-visibility-hook")) {
             return;
         }
+        Class<?> serviceClass = XposedHelpers.findClassIfExists(
+                CONTROL_CONTAINER_SERVICE, classLoader);
+        if (serviceClass == null) {
+            serviceClass = hintedClass(classLoader, CONTROL_CONTAINER_HINTS,
+                    CONTROL_CONTAINER_SERVICE_INTERFACE);
+        }
+        if (serviceClass == null) {
+            log("control container name hint not found; waiting for runtime discovery");
+            return;
+        }
+        hookControlContainerClass(serviceClass);
+    }
+
+    private void hookControlContainerClass(Class<?> serviceClass) {
+        if (!ModulePreferences.loadPlaybackStreamOverlayForHook()) {
+            return;
+        }
+        if (!HOOKED_CLASSES.add("control-container:" + serviceClass.getName())) {
+            return;
+        }
         try {
-            Class<?> serviceClass = XposedHelpers.findClassIfExists(
-                    CONTROL_CONTAINER_SERVICE, classLoader);
-            if (serviceClass == null) {
-                serviceClass = XposedHelpers.findClass(
-                        CONTROL_CONTAINER_SERVICE_913, classLoader);
-            }
             XC_MethodHook visibilityHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -695,17 +948,21 @@ public final class HookEntry implements IXposedHookLoadPackage {
             log("hooked Bilibili control container show/hide class="
                     + serviceClass.getName());
         } catch (Throwable throwable) {
-            log("Bilibili ControlContainerService visibility hook unavailable: "
-                    + throwable.getClass().getSimpleName());
+            HOOKED_CLASSES.remove("control-container:" + serviceClass.getName());
+            log("Bilibili ControlContainerService visibility hook unavailable class="
+                    + serviceClass.getName() + ": " + throwable.getClass().getSimpleName());
         }
     }
 
     private Activity activityFromControlContainerService(Object service) {
         try {
-            Object playerContainer = XposedHelpers.getObjectField(service, "a");
-            Object context = XposedHelpers.getObjectField(playerContainer, "c");
-            if (context instanceof Context) {
-                Activity activity = activityFromContext((Context) context);
+            Object playerContainer = fieldOfType(service, ABSTRACT_PLAYER_CONTAINER);
+            if (playerContainer == null) {
+                playerContainer = fieldOfType(service, PLAYER_CONTAINER);
+            }
+            Context context = playerContainerContext(playerContainer);
+            if (context != null) {
+                Activity activity = activityFromContext(context);
                 if (activity != null) {
                     return activity;
                 }
@@ -714,7 +971,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             // Fall back to the actual control-container View if the owner context is unavailable.
         }
         try {
-            Object controlContainer = XposedHelpers.getObjectField(service, "b");
+            Object controlContainer = fieldOfType(service, View.class.getName());
             if (controlContainer instanceof View) {
                 return activityFromContext(((View) controlContainer).getContext());
             }
