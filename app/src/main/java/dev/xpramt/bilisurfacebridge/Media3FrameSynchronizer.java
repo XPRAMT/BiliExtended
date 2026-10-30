@@ -1432,18 +1432,26 @@ final class Media3FrameSynchronizer {
                             onPlaybackRate(((Number) param.args[0]).floatValue(), "setSpeed");
                         }
                     });
-            hookPlayerMethod(playerClass, "_setPropertyFloat",
-                    new Class<?>[]{int.class, float.class}, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (((Integer) param.args[0]).intValue() == FFP_PROP_FLOAT_PLAYBACK_RATE) {
-                                onPlaybackRate(((Number) param.args[1]).floatValue(),
-                                        "_setPropertyFloat");
+            // _setPropertyFloat is not a Java method on 9.13/9.17 builds (rate goes through
+            // setSpeed here and IjkMediaPlayerClient.setPropertyFloat in ijkservice); optional.
+            String rawRateHook;
+            try {
+                hookPlayerMethod(playerClass, "_setPropertyFloat",
+                        new Class<?>[]{int.class, float.class}, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (((Integer) param.args[0]).intValue() == FFP_PROP_FLOAT_PLAYBACK_RATE) {
+                                    onPlaybackRate(((Number) param.args[1]).floatValue(),
+                                            "_setPropertyFloat");
+                                }
                             }
-                        }
-                    });
+                        });
+                rawRateHook = " +_setPropertyFloat";
+            } catch (NoSuchMethodError missing) {
+                rawRateHook = " (_setPropertyFloat absent; setSpeed+client path used)";
+            }
             playbackClockHooksInstalled = true;
-            return "installed IJK playback clock and lifecycle telemetry hooks" + clientHook;
+            return "installed IJK playback clock and lifecycle telemetry hooks" + clientHook + rawRateHook;
         } catch (Throwable throwable) {
             playbackClockHooksInstalled = true;
             return "IJK playback clock telemetry unavailable="

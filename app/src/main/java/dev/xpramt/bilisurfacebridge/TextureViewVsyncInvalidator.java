@@ -48,15 +48,28 @@ final class TextureViewVsyncInvalidator {
                             start((TextureView) param.thisObject);
                         }
                     });
-            XposedHelpers.findAndHookMethod(TextureView.class, "onDetachedFromWindow",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            stop((TextureView) param.thisObject);
-                        }
-                    });
+            // TextureView overrides the hidden onDetachedFromWindowInternal(), not
+            // onDetachedFromWindow(); hook it, falling back to View with a type filter.
+            XC_MethodHook detach = new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.thisObject instanceof TextureView) {
+                        stop((TextureView) param.thisObject);
+                    }
+                }
+            };
+            String detachHook;
+            try {
+                XposedHelpers.findAndHookMethod(TextureView.class,
+                        "onDetachedFromWindowInternal", detach);
+                detachHook = "TextureView.onDetachedFromWindowInternal";
+            } catch (NoSuchMethodError missing) {
+                XposedHelpers.findAndHookMethod(android.view.View.class,
+                        "onDetachedFromWindow", detach);
+                detachHook = "View.onDetachedFromWindow";
+            }
             installed = true;
-            return "TextureView VSync invalidator installed";
+            return "TextureView VSync invalidator installed detach=" + detachHook;
         } catch (Throwable throwable) {
             return "TextureView VSync invalidator unavailable="
                     + throwable.getClass().getSimpleName();
