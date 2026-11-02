@@ -98,7 +98,8 @@ final class PlayerSettingPanelHook {
                 }
             }
             return "in-player settings panel hooked (" + build.getName() + "); "
-                    + SettingsDialogEntry.install(classLoader);
+                    + SettingsDialogEntry.install(classLoader) + "; "
+                    + SettingsPageEntry.install(classLoader);
         } catch (Throwable throwable) {
             return "in-player settings panel hook unavailable="
                     + throwable.getClass().getSimpleName();
@@ -118,6 +119,137 @@ final class PlayerSettingPanelHook {
     /** Called for every Activity that resumes; the bottom-sheet entry needs one to show on. */
     static void noteActivity(Activity activity) {
         topActivity = new WeakReference<>(activity);
+    }
+
+    /**
+     * The same entry on Bilibili's own Settings page: a row between "Playback settings" and
+     * "Download settings". The page is an AndroidX PreferenceFragmentCompat (tablet:
+     * WideBiliPreferencesFragment); after it sets its PreferenceScreen we add a preference that
+     * looks like the "PlaySetting" one, ordered right after it.
+     */
+    private static final class SettingsPageEntry {
+        private static final String ANCHOR_KEY = "PlaySetting";
+        private static final String OUR_KEY = "bsb_ext";
+
+        static String install(ClassLoader loader) {
+            try {
+                Class<?> fragment = XposedHelpers.findClassIfExists(
+                        "androidx.preference.PreferenceFragmentCompat", loader);
+                if (fragment == null) {
+                    return "settings page entry: PreferenceFragmentCompat not found";
+                }
+                int hooked = XposedBridge.hookAllMethods(fragment, "setPreferenceScreen",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                try {
+                                    insert(param.args.length > 0 ? param.args[0] : null);
+                                } catch (Throwable throwable) {
+                                    logOnce("settings-page", throwable);
+                                }
+                            }
+                        }).size();
+                return "settings page entry hooked=" + hooked;
+            } catch (Throwable throwable) {
+                return "settings page entry unavailable=" + throwable.getClass().getSimpleName();
+            }
+        }
+
+        private static void insert(Object screen) throws Throwable {
+            if (screen == null) {
+                return;
+            }
+            Object anchor = XposedHelpers.callMethod(screen, "findPreference", ANCHOR_KEY);
+            if (anchor == null || XposedHelpers.callMethod(screen, "findPreference", OUR_KEY) != null) {
+                return;
+            }
+            Object group = XposedHelpers.callMethod(anchor, "getParent");
+            if (group == null) {
+                return;
+            }
+            Context context = (Context) XposedHelpers.callMethod(anchor, "getContext");
+            int anchorOrder = (Integer) XposedHelpers.callMethod(anchor, "getOrder");
+            Object ours;
+            try {
+                ours = XposedHelpers.newInstance(anchor.getClass(), context);
+            } catch (Throwable throwable) {
+                ours = XposedHelpers.newInstance(XposedHelpers.findClass(
+                        "androidx.preference.Preference", anchor.getClass().getClassLoader()),
+                        context);
+            }
+            XposedHelpers.callMethod(ours, "setKey", OUR_KEY);
+            XposedHelpers.callMethod(ours, "setTitle", (CharSequence) ROW_TITLE);
+            XposedHelpers.callMethod(ours, "setPersistent", false);
+            XposedHelpers.callMethod(ours, "setLayoutResource",
+                    XposedHelpers.callMethod(anchor, "getLayoutResource"));
+            XposedHelpers.callMethod(ours, "setWidgetLayoutResource",
+                    XposedHelpers.callMethod(anchor, "getWidgetLayoutResource"));
+            // The listener interface's name is obfuscated: take its type from the setter.
+            Method setter = null;
+            for (Method method : ours.getClass().getMethods()) {
+                if (method.getName().equals("setOnPreferenceClickListener")
+                        && method.getParameterTypes().length == 1) {
+                    setter = method;
+                    break;
+                }
+            }
+            if (setter == null) {
+                throw new IllegalStateException("click listener setter not found");
+            }
+            final Class<?> listener = setter.getParameterTypes()[0];
+            setter.invoke(ours, Proxy.newProxyInstance(
+                    hostLoader, new Class<?>[]{listener}, new InvocationHandler() {
+                        @Override
+                        public Object invoke(Object proxy, Method method, Object[] args) {
+                            if (method.getDeclaringClass() == Object.class) {
+                                return method.getName().equals("hashCode")
+                                        ? System.identityHashCode(proxy)
+                                        : method.getName().equals("equals") ? proxy == args[0]
+                                        : "bsb-click";
+                            }
+                            openFromSettingsPage(proxy, args == null ? null : args[0]);
+                            return Boolean.TRUE;
+                        }
+                    }));
+            // Make room: everything after the anchor moves one place down, then ours goes in.
+            int count = (Integer) XposedHelpers.callMethod(group, "getPreferenceCount");
+            for (int index = 0; index < count; index++) {
+                Object sibling = XposedHelpers.callMethod(group, "getPreference", index);
+                int order = (Integer) XposedHelpers.callMethod(sibling, "getOrder");
+                if (order > anchorOrder) {
+                    XposedHelpers.callMethod(sibling, "setOrder", order + 1);
+                }
+            }
+            XposedHelpers.callMethod(ours, "setOrder", anchorOrder + 1);
+            Object added = XposedHelpers.callMethod(group, "addPreference", ours);
+            android.util.Log.i(TAG, "settings page entry added=" + added + " order="
+                    + (anchorOrder + 1) + " class=" + ours.getClass().getName());
+        }
+
+        private static void openFromSettingsPage(Object listener, Object preference) {
+            try {
+                Context context = preference == null ? null
+                        : (Context) XposedHelpers.callMethod(preference, "getContext");
+                while (context instanceof ContextWrapper && !(context instanceof Activity)) {
+                    context = ((ContextWrapper) context).getBaseContext();
+                }
+                Activity activity = context instanceof Activity ? (Activity) context
+                        : topActivity == null ? null : topActivity.get();
+                if (activity == null) {
+                    throw new IllegalStateException("no activity");
+                }
+                InPlayerSettingsPanel.show(activity, null, null,
+                        new InPlayerSettingsPanel.Actions() {
+                            @Override
+                            public void applyRenderer(ModulePreferences.RendererMode mode) {
+                                switchRendererOn(renderService == null ? null
+                                        : renderService.get(), mode);
+                            }
+                        });
+            } catch (Throwable throwable) {
+                logOnce("settings-page-open", throwable);
+            }
+        }
     }
 
     /**
