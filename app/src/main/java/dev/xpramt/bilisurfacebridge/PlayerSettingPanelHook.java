@@ -143,8 +143,23 @@ final class PlayerSettingPanelHook {
                 }
                 int[] location = new int[2];
                 list.getLocationOnScreen(location);
-                return new Rect(location[0], location[1], location[0] + list.getWidth(),
+                Rect bounds = new Rect(location[0], location[1], location[0] + list.getWidth(),
                         location[1] + list.getHeight());
+                // The list sits inside the page with a margin on each side (the cards of the
+                // original rows are inset); the panel takes the page's full width.
+                // The first container above the list that is wider than it.
+                View wider = list;
+                while (wider.getParent() instanceof View) {
+                    wider = (View) wider.getParent();
+                    if (wider.getWidth() > list.getWidth()) {
+                        int[] widerLocation = new int[2];
+                        wider.getLocationOnScreen(widerLocation);
+                        bounds.left = widerLocation[0];
+                        bounds.right = widerLocation[0] + wider.getWidth();
+                        break;
+                    }
+                }
+                return bounds;
             } catch (Throwable throwable) {
                 logOnce("settings-page-bounds", throwable);
                 return null;
