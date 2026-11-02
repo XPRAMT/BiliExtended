@@ -223,10 +223,7 @@ final class Media3MinimalPlayerBridge {
 
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            if (ModulePreferences.loadAutoSelectBestAudioForHook()
-                                    || ModulePreferences.loadPlaybackStreamOverlayForHook()) {
-                                reportLiveQualityResult(param);
-                            }
+                            reportLiveQualityResult(param);
                         }
                     });
                     hooked++;
@@ -307,16 +304,14 @@ final class Media3MinimalPlayerBridge {
                     + " urlBw=" + urlBandwidth + " codec=" + codec
                     + " format=" + normalizeLiveFormat(format)
                     + " resultPresent=" + (result != null));
-            if (ModulePreferences.loadPlaybackStreamOverlayForHook()) {
-                String sourceUrl = liveSourceUrl(result);
-                if (!sourceUrl.isEmpty()) {
-                    PlaybackStreamOverlay.beginLiveAudioBitrateMeasurementForSource(sourceUrl);
-                    probeLiveAudioBitrateOnce(sourceUrl);
-                } else {
-                    PlaybackStreamOverlay.beginLiveAudioBitrateMeasurement();
-                    logOnce("live-bitrate-source-missing",
-                            "[DEBUG-live-bitrate] selected live URL unavailable");
-                }
+            String sourceUrl = liveSourceUrl(result);
+            if (!sourceUrl.isEmpty()) {
+                PlaybackStreamOverlay.beginLiveAudioBitrateMeasurementForSource(sourceUrl);
+                probeLiveAudioBitrateOnce(sourceUrl);
+            } else {
+                PlaybackStreamOverlay.beginLiveAudioBitrateMeasurement();
+                logOnce("live-bitrate-source-missing",
+                        "[DEBUG-live-bitrate] selected live URL unavailable");
             }
         } catch (Throwable throwable) {
             logOnce("live-quality-result-error",
@@ -2337,7 +2332,7 @@ final class Media3MinimalPlayerBridge {
             String selectedVideoLabel = videoCodecLabel(selectedVideo);
             String selectedAudioLabel = audioLabel(selectedAudio, selectedAudioBandwidth);
             String displaySelection = selectedVideoLabel + " " + selectedAudioLabel;
-            if (ModulePreferences.loadPlaybackStreamOverlayForHook() && !audio.isEmpty()) {
+            if (!audio.isEmpty()) {
                 long measurementGeneration =
                         PlaybackStreamOverlay.beginAudioBitrateMeasurementForSource(
                                 audio.get(0), selectedAudioLabel);
@@ -2472,12 +2467,12 @@ final class Media3MinimalPlayerBridge {
             display = currentVideoLabel + " " + currentAudioLabel;
         }
         if (audio) {
-            if (ModulePreferences.loadPlaybackStreamOverlayForHook() && !audioUrls.isEmpty()) {
+            if (!audioUrls.isEmpty()) {
                 long measurementGeneration =
                         PlaybackStreamOverlay.restartAudioBitrateMeasurementForSource(
                                 audioUrls.get(0), label);
                 probeVodAudioBitrateOnce(audioUrls, label, measurementGeneration);
-            } else if (ModulePreferences.loadPlaybackStreamOverlayForHook()) {
+            } else {
                 // A successful switch with no exposed segment URL must not leave the previous
                 // source's asynchronous probe in the permanent "計算中..." state.
                 PlaybackStreamOverlay.cancelAudioBitrateMeasurement(label);

@@ -156,7 +156,7 @@ final class InPlayerSettingsPanel {
                     PlaybackDebugOverlay.show(activity, "");
                     PlaybackDebugOverlay.refreshAll();
                 });
-        switchRow(card, "影音格式", "例如 HEVC | Hi-Res 96KHz；單獨控制，兩項都開時顯示在同一行；音訊位元率下一支影片才量得到。",
+        switchRow(card, "影音格式", "例如 HEVC | Hi-Res 96KHz；只管顯示或隱藏，兩項都開時顯示在同一行。",
                 ModulePreferences.loadPlaybackStreamOverlayForHook(),
                 ModulePreferences.KEY_PLAYBACK_STREAM_OVERLAY, enabled -> PlaybackDebugOverlay.refreshAll());
         marginRow(card);
