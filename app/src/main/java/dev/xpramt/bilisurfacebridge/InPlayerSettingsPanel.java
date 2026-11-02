@@ -206,7 +206,7 @@ final class InPlayerSettingsPanel {
             final ModulePreferences.RendererMode mode = modes[index];
             TextView chip = text(mode.label, 14, PRIMARY);
             chip.setGravity(Gravity.CENTER);
-            chip.setPadding(dp(4), dp(12), dp(4), dp(12));
+            chip.setPadding(dp(4), 0, dp(4), 0);
             chip.setOnClickListener(v -> {
                 HostSettings.set(ModulePreferences.KEY_VIDEO_DETAIL_RENDERER_MODE, mode.name());
                 paintChips(chips, modes, mode);
@@ -217,8 +217,8 @@ final class InPlayerSettingsPanel {
                 }
             });
             chips[index] = chip;
-            LinearLayout.LayoutParams parameters = new LinearLayout.LayoutParams(0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            // One fixed height for all three, enough for the two-line "Surface external".
+            LinearLayout.LayoutParams parameters = new LinearLayout.LayoutParams(0, dp(56), 1f);
             parameters.setMargins(index == 0 ? 0 : dp(6), dp(6), 0, 0);
             row.addView(chip, parameters);
         }
