@@ -32,7 +32,6 @@ final class InPlayerSettingsPanel {
         void applyRenderer(ModulePreferences.RendererMode mode);
     }
 
-    private static final int PANEL = Color.argb(245, 24, 30, 37);
     private static final int CARD = Color.rgb(33, 40, 48);
     private static final int DIVIDER = Color.rgb(52, 62, 73);
     private static final int PRIMARY = Color.WHITE;
@@ -82,10 +81,8 @@ final class InPlayerSettingsPanel {
         int width = Math.min(dp(300), Math.round(metrics.widthPixels * 0.40f));
         LinearLayout panel = new LinearLayout(activity);
         panel.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(PANEL);
-        background.setCornerRadii(new float[]{dp(18), dp(18), 0, 0, 0, 0, dp(18), dp(18)});
-        panel.setBackground(background);
+        // No background of its own: only the cards are drawn, like the original panel. Still
+        // clickable so a tap between the cards does not count as a tap outside.
         panel.setClickable(true);
         panel.setPadding(dp(16), dp(12), dp(16), dp(12));
         final FrameLayout.LayoutParams panelParameters = new FrameLayout.LayoutParams(
@@ -107,21 +104,10 @@ final class InPlayerSettingsPanel {
             });
         }
 
-        LinearLayout header = new LinearLayout(activity);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = text("bilibili Ext", 20, PRIMARY);
         title.setTypeface(null, Typeface.BOLD);
-        header.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView done = text("完成", 16, ON_ACCENT);
-        done.setTypeface(null, Typeface.BOLD);
-        done.setGravity(Gravity.CENTER);
-        done.setPadding(dp(22), dp(10), dp(22), dp(10));
-        done.setBackground(rounded(ACCENT, 20));
-        done.setOnClickListener(v -> dismiss(root));
-        header.addView(done);
-        panel.addView(header);
+        title.setShadowLayer(dp(4), 0, 0, Color.BLACK);
+        panel.addView(title);
 
         ScrollView scroll = new ScrollView(activity);
         scroll.setVerticalScrollBarEnabled(false);
