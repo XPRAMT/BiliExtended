@@ -46,11 +46,8 @@ final class PlaybackDebugOverlay {
 
     private int appliedTopMarginDp = -1;
 
-    /** Shown only while the setting is on; the margin follows the setting. */
     private void applyState() {
-        label.setVisibility(ModulePreferences.loadPlaybackDebugOverlayForHook()
-                ? View.VISIBLE : View.GONE);
-        applyTopMargin();
+        renderText();
     }
 
     /** Applies a changed setting right away instead of at the next one-second tick. */
@@ -83,18 +80,28 @@ final class PlaybackDebugOverlay {
 
     private float lastFps;
 
-    /** The single info line: Media3 Vsync state, fps, 1% low, renderer, then the stream format. */
+    /**
+     * The info line. Two independent parts joined with " | ": the fps part (Media3 Vsync state,
+     * average fps, 1% low, renderer) follows the fps overlay switch, the stream format follows
+     * the format switch. Nothing to show hides the line.
+     */
     private void renderText() {
-        String media3State = ModulePreferences.loadMedia3FrameSyncForHook() ? "On" : "Off";
-        StringBuilder text = new StringBuilder(media3State)
-                .append(" | Avg ").append(Math.round(lastFps)).append("fps | 1%Low ")
-                .append(callbackOnePercentLowText()).append(" | ").append(renderer);
+        StringBuilder text = new StringBuilder();
+        if (ModulePreferences.loadPlaybackDebugOverlayForHook()) {
+            text.append(ModulePreferences.loadMedia3FrameSyncForHook() ? "On" : "Off")
+                    .append(" | Avg ").append(Math.round(lastFps)).append("fps | 1%Low ")
+                    .append(callbackOnePercentLowText()).append(" | ").append(renderer);
+        }
         String stream = PlaybackStreamOverlay.labelForDebugOverlay();
         if (!stream.isEmpty()) {
-            text.append(" | ").append(stream);
+            if (text.length() > 0) {
+                text.append(" | ");
+            }
+            text.append(stream);
         }
         label.setText(text);
-        applyState();
+        label.setVisibility(text.length() > 0 ? View.VISIBLE : View.GONE);
+        applyTopMargin();
     }
 
     private final Runnable update = new Runnable() {

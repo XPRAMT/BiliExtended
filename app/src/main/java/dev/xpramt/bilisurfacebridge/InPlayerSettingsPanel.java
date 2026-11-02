@@ -150,13 +150,13 @@ final class InPlayerSettingsPanel {
     }
 
     private void overlay(LinearLayout card) {
-        switchRow(card, "顯示資訊浮層", "畫面頂端單行：On | Avg | 1%Low | 渲染器 | 影音格式；整條一起開關。",
+        switchRow(card, "fps 浮層", "畫面頂端：On | Avg | 1%Low | 渲染器。",
                 ModulePreferences.loadPlaybackDebugOverlayForHook(),
                 ModulePreferences.KEY_PLAYBACK_DEBUG_OVERLAY, enabled -> {
                     PlaybackDebugOverlay.show(activity, "");
                     PlaybackDebugOverlay.refreshAll();
                 });
-        switchRow(card, "顯示影音格式", "接在資訊浮層後面，例如 HEVC | Hi-Res 96KHz；音訊位元率下一支影片才量得到。",
+        switchRow(card, "影音格式", "例如 HEVC | Hi-Res 96KHz；單獨控制，兩項都開時顯示在同一行；音訊位元率下一支影片才量得到。",
                 ModulePreferences.loadPlaybackStreamOverlayForHook(),
                 ModulePreferences.KEY_PLAYBACK_STREAM_OVERLAY, enabled -> PlaybackDebugOverlay.refreshAll());
         marginRow(card);
@@ -299,7 +299,7 @@ final class InPlayerSettingsPanel {
             save.run();
         }));
         card.addView(line, matchWrap(0));
-        card.addView(text("整條資訊浮層的位置；拖動時即時改變。", 13, DESCRIPTION), matchWrap(2));
+        card.addView(text("浮層的位置；拖動時即時改變。", 13, DESCRIPTION), matchWrap(2));
     }
 
     private TextView stepButton(String symbol, final Runnable action) {

@@ -121,7 +121,7 @@ public final class MainActivity extends Activity {
         LinearLayout overlay = card(content, "資訊浮層");
 
         final TextView marginLabel = text("", 16, PRIMARY);
-        final TextView marginNote = text("0～100 dp，放開即套用；整條資訊浮層的位置。", 13, DESCRIPTION);
+        final TextView marginNote = text("0～100 dp，放開即套用；浮層的位置。", 13, DESCRIPTION);
         final SeekBar marginSlider = new SeekBar(this);
         // SeekBar has no minimum before API 26: progress 0 is MIN dp.
         final int minMargin = ModulePreferences.MIN_OVERLAY_TOP_MARGIN_DP;
@@ -146,12 +146,12 @@ public final class MainActivity extends Activity {
         });
 
         boolean fpsOverlayOn = ModulePreferences.isPlaybackDebugOverlayEnabled(this);
-        switchRow(overlay, "顯示資訊浮層", "畫面頂端單行：On | Avg 120fps | 1%Low 83fps | Surface Ext | 影音格式；整條一起開關。",
+        switchRow(overlay, "fps 浮層", "畫面頂端：On | Avg 120fps | 1%Low 83fps | Surface Ext。",
                 fpsOverlayOn, (button, checked) -> {
                     ModulePreferences.setPlaybackDebugOverlayEnabled(MainActivity.this, checked);
                     setMarginControlsEnabled(marginLabel, marginNote, marginSlider, checked);
                 });
-        switchRow(overlay, "顯示影音格式", "接在資訊浮層後面，例如 HEVC | Hi-Res 96KHz；需先開啟資訊浮層。",
+        switchRow(overlay, "影音格式", "例如 HEVC | Hi-Res 96KHz；單獨控制，兩項都開時顯示在同一行。",
                 ModulePreferences.isPlaybackStreamOverlayEnabled(this),
                 (button, checked) ->
                         ModulePreferences.setPlaybackStreamOverlayEnabled(
