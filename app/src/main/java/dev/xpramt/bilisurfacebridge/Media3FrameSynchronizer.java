@@ -330,6 +330,41 @@ final class Media3FrameSynchronizer {
         }
     }
 
+    /**
+     * Where IJK decodes inside the main process (no :ijkservice process, as on some phones), the
+     * service-side hooks never run, so the info overlay would never learn the real decoder
+     * format. This reports it from the main process, for IJK's own decoder threads only.
+     */
+    static String installMainProcessDecoderFormatRelay() {
+        try {
+            XposedHelpers.findAndHookMethod(MediaCodec.class, "configure", MediaFormat.class,
+                    Surface.class, MediaCrypto.class, int.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.hasThrowable()
+                                    || !Thread.currentThread().getName().startsWith("ijk_")) {
+                                return;
+                            }
+                            MediaFormat format = (MediaFormat) param.args[0];
+                            String mime = format == null || !format.containsKey(MediaFormat.KEY_MIME)
+                                    ? null : format.getString(MediaFormat.KEY_MIME);
+                            MediaCodec codec = (MediaCodec) param.thisObject;
+                            if (isAudio(format)) {
+                                DecoderFormatRelay.publishConfiguredAudio(mime,
+                                        formatBitrate(format), formatSampleRate(format),
+                                        codecName(codec));
+                            } else if (isVideo(format)) {
+                                DecoderFormatRelay.publishConfiguredVideo(mime, codecName(codec));
+                            }
+                        }
+                    });
+            return "installed main-process decoder format relay";
+        } catch (Throwable throwable) {
+            return "main-process decoder format relay unavailable="
+                    + throwable.getClass().getSimpleName();
+        }
+    }
+
     private static void beforeConfigure(MediaCodec codec, MediaFormat format) {
         if (!isVideo(format) || !experimentsEnabled() || !ModulePreferences.loadQtiOutputFenceForHook()
                 || !isQtiDecoder(codec)) {

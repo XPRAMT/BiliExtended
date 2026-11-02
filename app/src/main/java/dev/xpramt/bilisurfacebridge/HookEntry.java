@@ -115,6 +115,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
             installPictureQueueSizeHook(loadPackageParam.classLoader);
             // Installed whatever the setting says; each hook checks Media3 Vsync when it runs, so
             // the in-player menu can switch it on without restarting Bilibili.
+            logOnce("main-process-decoder-format",
+                    Media3FrameSynchronizer.installMainProcessDecoderFormatRelay());
             logOnce("external-render-immediate", ExternalRenderImmediate.install());
             logOnce("textureview-vsync-invalidator", TextureViewVsyncInvalidator.install());
             logOnce("external-render-timestamps", ExternalRenderTimestamps.install());
@@ -863,9 +865,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
      * longer expose the legacy render-layer factory used by the original attachment path.
      */
     private void hookPlaybackActivityLifecycle(ClassLoader classLoader) {
-        if (!ModulePreferences.loadPlaybackStreamOverlayForHook()) {
-            return;
-        }
+        // Installed whatever the setting says now: embedded patching cannot read settings this
+        // early, and PlaybackStreamOverlay.show() checks the setting each time it runs.
         try {
             XposedHelpers.findAndHookMethod(Activity.class, "onPostResume",
                     new XC_MethodHook() {
@@ -903,9 +904,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private void hookControlContainerClass(Class<?> serviceClass) {
-        if (!ModulePreferences.loadPlaybackStreamOverlayForHook()) {
-            return;
-        }
         if (!HOOKED_CLASSES.add("control-container:" + serviceClass.getName())) {
             return;
         }
