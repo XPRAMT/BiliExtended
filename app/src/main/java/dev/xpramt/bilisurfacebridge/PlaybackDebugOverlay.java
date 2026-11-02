@@ -60,7 +60,7 @@ final class PlaybackDebugOverlay {
                 overlay.mainHandler.post(new Runnable() {
                     @Override
                     public void run() {
-                        overlay.applyState();
+                        overlay.renderText();
                     }
                 });
             }
@@ -81,27 +81,32 @@ final class PlaybackDebugOverlay {
         }
     }
 
+    private float lastFps;
+
+    /** The single info line: Media3 Vsync state, fps, 1% low, renderer, then the stream format. */
+    private void renderText() {
+        String media3State = ModulePreferences.loadMedia3FrameSyncForHook() ? "On" : "Off";
+        StringBuilder text = new StringBuilder(media3State)
+                .append(" | Avg ").append(Math.round(lastFps)).append("fps | 1%Low ")
+                .append(callbackOnePercentLowText()).append(" | ").append(renderer);
+        String stream = PlaybackStreamOverlay.labelForDebugOverlay();
+        if (!stream.isEmpty()) {
+            text.append(" | ").append(stream);
+        }
+        label.setText(text);
+        applyState();
+    }
+
     private final Runnable update = new Runnable() {
         @Override
         public void run() {
             long now = SystemClock.elapsedRealtime();
             long frames = DISPLAYED_FRAMES.get();
             long elapsed = Math.max(1L, now - previousSampleTime);
-            float fps = (frames - previousFrameCount) * 1000.0f / elapsed;
+            lastFps = (frames - previousFrameCount) * 1000.0f / elapsed;
             previousFrameCount = frames;
             previousSampleTime = now;
-            String onePercentLow = callbackOnePercentLowText();
-            String media3State = ModulePreferences.loadMedia3FrameSyncForHook()
-                    ? "On" : "Off";
-            StringBuilder text = new StringBuilder(media3State)
-                    .append(" | Avg ").append(Math.round(fps)).append("fps | 1%Low ")
-                    .append(onePercentLow).append(" | ").append(renderer);
-            String stream = PlaybackStreamOverlay.labelForDebugOverlay();
-            if (!stream.isEmpty()) {
-                text.append(" | ").append(stream);
-            }
-            label.setText(text);
-            applyState();
+            renderText();
             mainHandler.postDelayed(this, 1000L);
         }
     };

@@ -3,10 +3,13 @@ package dev.xpramt.bilisurfacebridge;
 import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.graphics.Rect;
+import android.view.View;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -46,6 +49,8 @@ final class PlayerSettingPanelHook {
     private static Class<?> positionType;
     private static Class<?> function0Class;
     private static Object unit;
+    /** The original panel's list view: its bounds are the panel without the shadow. */
+    private static WeakReference<View> content;
 
     private PlayerSettingPanelHook() {
     }
@@ -77,6 +82,21 @@ final class PlayerSettingPanelHook {
             unit = XposedHelpers.getStaticObjectField(
                     classLoader.loadClass("kotlin.Unit"), "INSTANCE");
             XposedBridge.hookMethod(build, new RowBuilderHook());
+            for (Method method : widgetClass.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if (parameters.length == 1 && parameters[0] == Context.class
+                        && View.class.isAssignableFrom(method.getReturnType())) {
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.getResult() instanceof View) {
+                                content = new WeakReference<>((View) param.getResult());
+                            }
+                        }
+                    });
+                    break;
+                }
+            }
             return "in-player settings panel hooked (" + build.getName() + ")";
         } catch (Throwable throwable) {
             return "in-player settings panel hook unavailable="
@@ -149,15 +169,28 @@ final class PlayerSettingPanelHook {
             if (!(context instanceof Activity)) {
                 throw new IllegalStateException("no Activity behind the panel context");
             }
-            InPlayerSettingsPanel.show((Activity) context, new InPlayerSettingsPanel.Actions() {
-                @Override
-                public void applyRenderer(ModulePreferences.RendererMode mode) {
-                    switchRenderer(widget, mode);
-                }
-            });
+            InPlayerSettingsPanel.show((Activity) context, contentBounds(),
+                    new InPlayerSettingsPanel.Actions() {
+                        @Override
+                        public void applyRenderer(ModulePreferences.RendererMode mode) {
+                            switchRenderer(widget, mode);
+                        }
+                    });
         } catch (Throwable throwable) {
             logOnce("open", throwable);
         }
+    }
+
+    /** Where the original panel's content sits on screen, or null if it cannot be measured. */
+    private static Rect contentBounds() {
+        View view = content == null ? null : content.get();
+        if (view == null || !view.isAttachedToWindow() || view.getWidth() <= 0) {
+            return null;
+        }
+        int[] location = new int[2];
+        view.getLocationOnScreen(location);
+        return new Rect(location[0], location[1],
+                location[0] + view.getWidth(), location[1] + view.getHeight());
     }
 
     /**

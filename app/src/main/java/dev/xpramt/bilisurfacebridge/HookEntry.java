@@ -831,7 +831,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
         // The fps overlay is always attached and hides itself when switched off, so the
         // in-player menu can turn it on mid-playback.
         boolean debugOverlayEnabled = true;
-        boolean streamOverlayEnabled = ModulePreferences.loadPlaybackStreamOverlayForHook();
         if (!isVideoPlaybackActivity(factoryContext(factory)) || !(layer instanceof View)) {
             return;
         }
@@ -849,10 +848,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             logOnce("debug-overlay:" + rendererClass,
                     "debug overlay attached renderer=" + rendererClass);
         }
-        if (streamOverlayEnabled) {
-            PlaybackStreamOverlay.show(activity);
-            logOnce("stream-overlay", "stream overlay attached");
-        }
+        // The format text is part of the info overlay line; no separate stream label.
     }
 
     private boolean isVideoPlaybackActivity(String contextName) {

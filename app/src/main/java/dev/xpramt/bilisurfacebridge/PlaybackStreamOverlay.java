@@ -48,7 +48,8 @@ final class PlaybackStreamOverlay {
     /** The "video | audio" text for the debug overlay, or "" while nothing is confirmed yet. */
     static String labelForDebugOverlay() {
         String selection = latestSelection;
-        if (confirmedDecoderVideoLabel == null || selection == null) {
+        if (!ModulePreferences.loadPlaybackStreamOverlayForHook()
+                || confirmedDecoderVideoLabel == null || selection == null) {
             return "";
         }
         return selection.replace(" / ", " | ");
@@ -239,11 +240,9 @@ final class PlaybackStreamOverlay {
 
     private static void applyPlaybackControlVisibility(Activity activity,
             OutlinedTextView label) {
-        // The debug overlay carries this text in its own line; do not show it twice.
-        boolean visible = !ModulePreferences.loadPlaybackDebugOverlayForHook()
-                && PlaybackOverlayVisibilityState.shouldShow(
-                        CONTROL_VISIBILITY.get(activity),
-                        Boolean.TRUE.equals(POSITION_READY.get(activity)));
+        // The format text lives in the info overlay's own line (PlaybackDebugOverlay), which the
+        // fps overlay switch controls as a whole; this separate label stays hidden.
+        boolean visible = false;
         label.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 

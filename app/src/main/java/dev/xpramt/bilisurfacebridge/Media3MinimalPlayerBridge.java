@@ -648,7 +648,8 @@ final class Media3MinimalPlayerBridge {
     }
 
     private static void scheduleActualAudioDecoderProbe(final Object player) {
-        if (!ModulePreferences.loadPlaybackStreamOverlayForHook() || player == null) {
+        // Collected whatever the format switch says, so it can be switched on mid-playback.
+        if (player == null) {
             return;
         }
         final WeakReference<Object> reference = new WeakReference<Object>(player);
@@ -673,7 +674,7 @@ final class Media3MinimalPlayerBridge {
     }
 
     private static void inspectActualAudioDecoder(Object player, Object mediaInfo) {
-        if (!ModulePreferences.loadPlaybackStreamOverlayForHook() || player == null) {
+        if (player == null) {
             return;
         }
         try {

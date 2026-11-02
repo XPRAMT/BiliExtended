@@ -2,6 +2,7 @@ package dev.xpramt.bilisurfacebridge;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.util.DisplayMetrics;
@@ -52,13 +53,13 @@ final class InPlayerSettingsPanel {
         this.density = activity.getResources().getDisplayMetrics().density;
     }
 
-    static void show(Activity activity, Actions actions) {
+    static void show(Activity activity, Rect bounds, Actions actions) {
         View existing = open == null ? null : open.get();
         if (existing != null && existing.getParent() instanceof ViewGroup) {
             ((ViewGroup) existing.getParent()).removeView(existing);
         }
         InPlayerSettingsPanel panel = new InPlayerSettingsPanel(activity, actions);
-        View root = panel.build();
+        View root = panel.build(bounds);
         open = new WeakReference<View>(root);
         activity.addContentView(root, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -66,7 +67,7 @@ final class InPlayerSettingsPanel {
 
     // ---- layout -------------------------------------------------------------------------
 
-    private View build() {
+    private View build(final Rect bounds) {
         final FrameLayout root = new FrameLayout(activity);
         // Above the player's controls, which sit in the same window.
         root.setElevation(dp(48));
@@ -87,9 +88,24 @@ final class InPlayerSettingsPanel {
         panel.setBackground(background);
         panel.setClickable(true);
         panel.setPadding(dp(16), dp(12), dp(16), dp(12));
-        FrameLayout.LayoutParams panelParameters = new FrameLayout.LayoutParams(
+        final FrameLayout.LayoutParams panelParameters = new FrameLayout.LayoutParams(
                 width, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
         root.addView(panel, panelParameters);
+        if (bounds != null) {
+            // Same width and position as the original panel (without its shadow); the root's own
+            // offset on screen is only known once it is laid out.
+            root.post(new Runnable() {
+                @Override
+                public void run() {
+                    int[] origin = new int[2];
+                    root.getLocationOnScreen(origin);
+                    panelParameters.gravity = Gravity.START;
+                    panelParameters.width = bounds.width();
+                    panelParameters.leftMargin = bounds.left - origin[0];
+                    panel.setLayoutParams(panelParameters);
+                }
+            });
+        }
 
         LinearLayout header = new LinearLayout(activity);
         header.setOrientation(LinearLayout.HORIZONTAL);
@@ -134,15 +150,15 @@ final class InPlayerSettingsPanel {
     }
 
     private void overlay(LinearLayout card) {
-        switchRow(card, "fps 浮層", "畫面頂端單行：On | Avg | 1%Low | 渲染器。",
+        switchRow(card, "顯示資訊浮層", "畫面頂端單行：On | Avg | 1%Low | 渲染器 | 影音格式；整條一起開關。",
                 ModulePreferences.loadPlaybackDebugOverlayForHook(),
                 ModulePreferences.KEY_PLAYBACK_DEBUG_OVERLAY, enabled -> {
                     PlaybackDebugOverlay.show(activity, "");
                     PlaybackDebugOverlay.refreshAll();
                 });
-        switchRow(card, "影音格式", "例如 HEVC | Hi-Res 96KHz；下一支影片生效。",
+        switchRow(card, "顯示影音格式", "接在資訊浮層後面，例如 HEVC | Hi-Res 96KHz；音訊位元率下一支影片才量得到。",
                 ModulePreferences.loadPlaybackStreamOverlayForHook(),
-                ModulePreferences.KEY_PLAYBACK_STREAM_OVERLAY, null);
+                ModulePreferences.KEY_PLAYBACK_STREAM_OVERLAY, enabled -> PlaybackDebugOverlay.refreshAll());
         marginRow(card);
     }
 
@@ -283,7 +299,7 @@ final class InPlayerSettingsPanel {
             save.run();
         }));
         card.addView(line, matchWrap(0));
-        card.addView(text("只作用於 fps 浮層；拖動時即時改變位置。", 13, DESCRIPTION), matchWrap(2));
+        card.addView(text("整條資訊浮層的位置；拖動時即時改變。", 13, DESCRIPTION), matchWrap(2));
     }
 
     private TextView stepButton(String symbol, final Runnable action) {
@@ -297,7 +313,7 @@ final class InPlayerSettingsPanel {
     }
 
     private static String marginText(int dp) {
-        return "fps 浮層距離頂端　" + dp + " dp";
+        return "浮層距離頂端　" + dp + " dp";
     }
 
     // ---- building blocks ----------------------------------------------------------------

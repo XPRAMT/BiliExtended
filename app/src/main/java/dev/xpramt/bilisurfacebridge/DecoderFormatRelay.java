@@ -91,8 +91,7 @@ final class DecoderFormatRelay {
     }
 
     static void publishConfiguredVideo(String mime, String decoderName) {
-        if (mime == null || !mime.startsWith("video/")
-                || !ModulePreferences.loadPlaybackStreamOverlayForHook()) {
+        if (mime == null || !mime.startsWith("video/")) {
             return;
         }
         Context context = currentApplicationContext();
@@ -117,8 +116,7 @@ final class DecoderFormatRelay {
 
     static void publishConfiguredAudio(String mime, int bitrate, int sampleRate,
                                        String decoderName) {
-        if (mime == null || !mime.startsWith("audio/")
-                || !ModulePreferences.loadPlaybackStreamOverlayForHook()) {
+        if (mime == null || !mime.startsWith("audio/")) {
             return;
         }
         Context context = currentApplicationContext();
@@ -147,8 +145,7 @@ final class DecoderFormatRelay {
 
     static void publishMeasuredAudioBitrate(String label, long bitrate, String sourceUrl,
                                             long generation) {
-        if (label == null || label.trim().isEmpty() || bitrate <= 0L
-                || !ModulePreferences.loadPlaybackStreamOverlayForHook()) {
+        if (label == null || label.trim().isEmpty() || bitrate <= 0L) {
             return;
         }
         Context context = currentApplicationContext();
