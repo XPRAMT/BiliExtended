@@ -17,7 +17,7 @@ The module supports Android 7.0 / API 24 and later and registers `dev.xpramt.bil
 | **Playback debug overlay** | Diagnostic only: shows the active renderer, the IJK video-display callback rate and its rolling 1 % low, and enables the telemetry and trace counters used by the measurement tools. Leave it off for normal use. |
 | **Playback stream overlay** | Shows one line with the decoder-confirmed video format and the selected audio format, bitrate and sample rate (for example `HEVC / Hi-Res 96KHz`) in normal playback and live rooms. |
 | **Automatically select best audio** | On first playback picks the highest-bandwidth separate DASH audio track when the player exposes one; muxed single streams stay under Bilibili's own selection. |
-| **120 fps frame sync** (default on) | Schedules and timestamps video frames the way Media3 does, at 0.5x / 1x / 2x speed. Described below. |
+| **Media3 Vsync** (default on) | Schedules and timestamps video frames the way Media3 does, at 0.5x / 1x / 2x speed. Described below. |
 | **Qualcomm decoder output fence** (default on) | Adds the QTI software output-fence vendor keys when configuring a Qualcomm video decoder, so decoded frames are handed out earlier. Only applied when the decoder declares those keys (Bilibili 9.13's decoder currently does not, so it is not applied there). |
 
 Every change takes effect after Bilibili is fully closed and reopened.

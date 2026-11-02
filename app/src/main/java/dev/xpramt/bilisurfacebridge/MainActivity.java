@@ -197,10 +197,10 @@ public final class MainActivity extends Activity {
         add(content, autoSelectBestAudio, 0, 12);
         addSettingNote(content, "開啟時，初始播放會在一般 DASH 音軌中挑選頻寬最高者；關閉時完整保留 Bilibili 原始預設音軌。切換後須完整關閉再開啟 Bilibili。", Color.LTGRAY);
 
-        addSection(content, "120 fps 播放", "NX809J 的 120 fps 點播微卡頓修正；切換後須完整關閉再開啟 Bilibili。");
+        addSection(content, "Media3 Vsync", "高幀率點播微卡頓修正；切換後須完整關閉再開啟 Bilibili。");
 
         Switch frameSync = new Switch(this);
-        frameSync.setText("120 fps 幀同步");
+        frameSync.setText("Media3 Vsync");
         frameSync.setTextSize(16);
         frameSync.setTextColor(PRIMARY);
         frameSync.setChecked(ModulePreferences.isMedia3FrameSyncEnabled(this));
