@@ -296,10 +296,6 @@ final class PlayerSettingPanelHook {
      */
     private static final class SettingsDialogEntry {
         private static final String ADAPTER = "com.bilibili.app.gemini.ui.f";
-        private static final String DESCRIPTION =
-                "com.bilibili.playerbizcommonv2.widget.setting.channel.VideoSettingDescriptionComponent";
-        private static final String SWITCH =
-                "com.bilibili.playerbizcommonv2.widget.setting.channel.VideoSettingSwitchComponent";
         // Mask bits of the data class's synthetic constructor: use the default for iconUrl (2),
         // visible (8), description (16), title end icon (128), its click (512), badge (1024),
         // the four colours and the exposure entry.
@@ -310,10 +306,8 @@ final class PlayerSettingPanelHook {
         static String install(ClassLoader loader) {
             try {
                 final Class<?> adapter = XposedHelpers.findClassIfExists(ADAPTER, loader);
-                final Class<?> description = XposedHelpers.findClassIfExists(DESCRIPTION, loader);
-                final Class<?> switchRow = XposedHelpers.findClassIfExists(SWITCH, loader);
-                if (adapter == null || description == null || switchRow == null) {
-                    return "settings dialog entry: classes not found";
+                if (adapter == null) {
+                    return "settings dialog entry: adapter not found";
                 }
                 XposedBridge.hookAllMethods(android.app.Dialog.class, "show", new XC_MethodHook() {
                     @Override
@@ -326,7 +320,7 @@ final class PlayerSettingPanelHook {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
                                 try {
-                                    insert(param, description, switchRow);
+                                    insert(param);
                                 } catch (Throwable throwable) {
                                     logOnce("dialog-insert", throwable);
                                 }
@@ -338,8 +332,37 @@ final class PlayerSettingPanelHook {
             }
         }
 
-        private static void insert(XC_MethodHook.MethodHookParam param, Class<?> description,
-                                   Class<?> switchRow) throws Throwable {
+        /**
+         * The row classes are obfuscated in some versions (9.13: ...channel.D / .j), so rows are
+         * recognised by their data object's toString(), which Kotlin generates from the original
+         * names: "VideoSettingSwitch(" and "VideoSettingDescription(".
+         */
+        private static String kind(Object component) {
+            if (component == null) {
+                return "";
+            }
+            try {
+                for (Field field : component.getClass().getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    Object data = field.get(component);
+                    String text = data == null ? "" : String.valueOf(data);
+                    if (text.startsWith("VideoSettingSwitch(")) {
+                        return "switch";
+                    }
+                    if (text.startsWith("VideoSettingDescription(")) {
+                        return "description";
+                    }
+                }
+            } catch (Throwable ignored) {
+                // Not a row we know.
+            }
+            return "";
+        }
+
+        private static void insert(XC_MethodHook.MethodHookParam param) throws Throwable {
             if (param.args.length != 1 || !(param.args[0] instanceof List)) {
                 return;
             }
@@ -351,7 +374,7 @@ final class PlayerSettingPanelHook {
             }
             int lastSwitch = -1;
             for (int index = 0; index < original.size(); index++) {
-                if (switchRow.isInstance(original.get(index))) {
+                if (kind(original.get(index)).equals("switch")) {
                     lastSwitch = index;
                 }
             }
@@ -360,7 +383,7 @@ final class PlayerSettingPanelHook {
             }
             int anchor = -1;
             for (int index = lastSwitch + 1; index < original.size(); index++) {
-                if (description.isInstance(original.get(index))) {
+                if (kind(original.get(index)).equals("description")) {
                     anchor = index;
                     break;
                 }
@@ -369,7 +392,7 @@ final class PlayerSettingPanelHook {
                 return;
             }
             if (ourComponent == null) {
-                ourComponent = description.getConstructors()[0].newInstance(
+                ourComponent = original.get(anchor).getClass().getConstructors()[0].newInstance(
                         copyData(original.get(anchor)));
             }
             List<Object> merged = new ArrayList<>(original);
