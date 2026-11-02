@@ -124,6 +124,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
         // exists, so a load-time check would always see the default.
         if (TARGET_PACKAGE.equals(loadPackageParam.processName)) {
             logOnce("replace-story-video", StoryRouteHook.install(loadPackageParam.classLoader));
+            logOnce("player-settings-panel",
+                    PlayerSettingPanelHook.install(loadPackageParam.classLoader));
         }
         hookIjkDisplayFrameCounter(loadPackageParam.classLoader);
         hookFactory(loadPackageParam.classLoader);
