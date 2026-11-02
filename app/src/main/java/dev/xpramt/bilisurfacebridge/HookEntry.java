@@ -466,6 +466,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     Object layer = param.getResult();
                     reportLayer("factory", layer);
                     attachDebugOverlayForPlayback(param.thisObject, layer);
+                    if (layer != null) {
+                        NativeResolutionOutput.attach(layer);
+                    }
                     if (SURFACE_FRAME_RATE_VOTE && layer != null
                             && isVideoPlaybackActivity(factoryContext(param.thisObject))) {
                         voteSurfaceFrameRate(layer);

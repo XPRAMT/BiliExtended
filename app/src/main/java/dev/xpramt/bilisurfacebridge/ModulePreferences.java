@@ -27,6 +27,7 @@ final class ModulePreferences {
     static final String KEY_FRAME_QUEUE_WAIT_ROUND_UP = "frame_queue_wait_round_up";
     static final String KEY_MINIMAL_MEDIA3_PLAYER = "minimal_media3_player";
     static final String KEY_REPLACE_STORY_VIDEO = "replace_story_video";
+    static final String KEY_NATIVE_RESOLUTION_OUTPUT = "native_resolution_output";
     static final String KEY_OVERLAY_TOP_MARGIN_DP = "overlay_top_margin_dp";
     static final int DEFAULT_OVERLAY_TOP_MARGIN_DP = 12;
     static final int MIN_OVERLAY_TOP_MARGIN_DP = 0;
@@ -57,6 +58,26 @@ final class ModulePreferences {
     static final boolean DEFAULT_FRAME_QUEUE_WAIT_ROUND_UP = false;
     static final boolean DEFAULT_MINIMAL_MEDIA3_PLAYER = false;
     static final boolean DEFAULT_REPLACE_STORY_VIDEO = false;
+    static final boolean DEFAULT_NATIVE_RESOLUTION_OUTPUT = false;
+
+    static boolean isNativeResolutionOutputEnabled(Context context) {
+        return preferences(context).getBoolean(
+                KEY_NATIVE_RESOLUTION_OUTPUT, DEFAULT_NATIVE_RESOLUTION_OUTPUT);
+    }
+
+    static void setNativeResolutionOutputEnabled(Context context, boolean enabled) {
+        commitPreferences(context, preferences(context).edit()
+                .putBoolean(KEY_NATIVE_RESOLUTION_OUTPUT, enabled));
+    }
+
+    static boolean loadNativeResolutionOutputForHook() {
+        try {
+            return hookPreferences().getBoolean(
+                    KEY_NATIVE_RESOLUTION_OUTPUT, DEFAULT_NATIVE_RESOLUTION_OUTPUT);
+        } catch (Throwable ignored) {
+            return DEFAULT_NATIVE_RESOLUTION_OUTPUT;
+        }
+    }
 
     private static volatile boolean automationProfileLocksRenderer = false;
 

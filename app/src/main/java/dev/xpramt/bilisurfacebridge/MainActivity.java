@@ -117,6 +117,14 @@ public final class MainActivity extends Activity {
                 (button, checked) ->
                         ModulePreferences.setQtiOutputFenceEnabled(MainActivity.this, checked));
 
+        if (ScreenPhysicalSize.hasHiddenResolution(getWindowManager().getDefaultDisplay())) {
+            switchRow(smoothness, "原生解析度輸出",
+                    "螢幕物理解析度高於 UI 時，影片以物理解析度輸出（UI 維持原尺寸）。",
+                    ModulePreferences.isNativeResolutionOutputEnabled(this),
+                    (button, checked) -> ModulePreferences
+                            .setNativeResolutionOutputEnabled(MainActivity.this, checked));
+        }
+
         // ---- 資訊浮層 ----
         LinearLayout overlay = card(content, "資訊浮層");
 

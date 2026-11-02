@@ -140,6 +140,12 @@ final class InPlayerSettingsPanel {
         switchRow(card, "高通解碼器輸出 fence", "降低解碼延遲；下一支影片生效。",
                 ModulePreferences.loadQtiOutputFenceForHook(),
                 ModulePreferences.KEY_QTI_OUTPUT_FENCE, null);
+        if (ScreenPhysicalSize.hasHiddenResolution(activity.getWindowManager().getDefaultDisplay())) {
+            switchRow(card, "原生解析度輸出", "影片以螢幕物理解析度輸出，UI 維持原尺寸。",
+                    ModulePreferences.loadNativeResolutionOutputForHook(),
+                    ModulePreferences.KEY_NATIVE_RESOLUTION_OUTPUT,
+                    enabled -> NativeResolutionOutput.refreshAll());
+        }
     }
 
     private void overlay(LinearLayout card) {

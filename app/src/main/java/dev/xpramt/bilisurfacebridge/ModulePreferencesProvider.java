@@ -93,6 +93,9 @@ public final class ModulePreferencesProvider extends ContentProvider {
                 case ModulePreferences.KEY_AUTO_SELECT_BEST_AUDIO:
                     ModulePreferences.setAutoSelectBestAudioEnabled(context, enabled);
                     return true;
+                case ModulePreferences.KEY_NATIVE_RESOLUTION_OUTPUT:
+                    ModulePreferences.setNativeResolutionOutputEnabled(context, enabled);
+                    return true;
                 case ModulePreferences.KEY_REPLACE_STORY_VIDEO:
                     ModulePreferences.setReplaceStoryVideoEnabled(context, enabled);
                     return true;
