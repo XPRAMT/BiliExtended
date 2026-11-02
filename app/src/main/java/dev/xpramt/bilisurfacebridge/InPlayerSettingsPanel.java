@@ -178,7 +178,11 @@ final class InPlayerSettingsPanel {
             public void onCheckedChanged(CompoundButton button, boolean isChecked) {
                 HostSettings.set(key, isChecked);
                 if (after != null) {
-                    after.run(isChecked);
+                    try {
+                        after.run(isChecked);
+                    } catch (Throwable throwable) {
+                        logFailure("switch " + key, throwable);
+                    }
                 }
             }
         });
@@ -202,7 +206,11 @@ final class InPlayerSettingsPanel {
             chip.setOnClickListener(v -> {
                 HostSettings.set(ModulePreferences.KEY_VIDEO_DETAIL_RENDERER_MODE, mode.name());
                 paintChips(chips, modes, mode);
-                actions.applyRenderer(mode);
+                try {
+                    actions.applyRenderer(mode);
+                } catch (Throwable throwable) {
+                    logFailure("renderer", throwable);
+                }
             });
             chips[index] = chip;
             LinearLayout.LayoutParams parameters = new LinearLayout.LayoutParams(0,
@@ -348,6 +356,12 @@ final class InPlayerSettingsPanel {
         if (root.getParent() instanceof ViewGroup) {
             ((ViewGroup) root.getParent()).removeView(root);
         }
+    }
+
+    private static void logFailure(String what, Throwable throwable) {
+        de.robv.android.xposed.XposedBridge.log("BiliSurfaceBridge: in-player settings " + what
+                + " failed: " + throwable.getClass().getSimpleName() + " "
+                + throwable.getMessage());
     }
 
     static void toast(Activity activity, String message) {

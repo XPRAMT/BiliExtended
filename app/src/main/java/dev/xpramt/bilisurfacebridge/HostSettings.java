@@ -17,7 +17,13 @@ final class HostSettings {
 
     /** {@code value} is a Boolean, an Integer or a String, as the provider whitelist expects. */
     static void set(final String key, final Object value) {
-        ModulePreferences.setHostOverride(key, value);
+        // A failure here must never take the player down with it.
+        try {
+            ModulePreferences.setHostOverride(key, value);
+        } catch (Throwable throwable) {
+            XposedBridge.log("BiliSurfaceBridge: setting " + key + " override failed: "
+                    + throwable.getClass().getSimpleName() + " " + throwable.getMessage());
+        }
         write(key, value);
     }
 

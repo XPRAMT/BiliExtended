@@ -388,7 +388,7 @@ final class ModulePreferences {
             cachedHookPreferencesNs = now;
         }
         if (cachedHookPreferences.getFile().canRead()) {
-            return cachedHookPreferences;
+            return HOOK_VIEW.delegateTo(cachedHookPreferences);
         }
         SharedPreferences snapshot = providerSnapshot;
         if (snapshot == null) {
@@ -423,7 +423,11 @@ final class ModulePreferences {
 
     /** Records a change made inside Bilibili; it takes effect in every Bilibili process. */
     static void setHostOverride(String key, Object value) {
+        hookPreferences();  // makes sure the module's own preferences are known
         SharedPreferences module = HOOK_VIEW.delegate();
+        if (module == null) {
+            return;
+        }
         String moduleValue;
         if (value instanceof Boolean) {
             // An unset key reads as the opposite of the new value (see OverridePreferences).
