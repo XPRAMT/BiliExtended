@@ -53,13 +53,11 @@ final class PlaybackDebugOverlay {
             float fps = (frames - previousFrameCount) * 1000.0f / elapsed;
             previousFrameCount = frames;
             previousSampleTime = now;
-            String callbackRate = String.format(java.util.Locale.US, "%.1f", fps);
             String onePercentLow = callbackOnePercentLowText();
             String media3State = ModulePreferences.loadMedia3FrameSyncForHook()
-                    ? "ON" : "OFF";
-            label.setText("120 fps 幀同步  " + media3State + "\n"
-                    + "IJK callback  " + callbackRate + " fps\n"
-                    + "1% low  " + onePercentLow + "\n" + renderer);
+                    ? "On" : "Off";
+            label.setText(media3State + " | Avg " + Math.round(fps) + "fps | 1%Low "
+                    + onePercentLow);
             mainHandler.postDelayed(this, 1000L);
         }
     };
@@ -114,7 +112,7 @@ final class PlaybackDebugOverlay {
     private static String callbackOnePercentLowText() {
         synchronized (FRAME_TIMING_LOCK) {
             if (frameIntervalCount < MINIMUM_INTERVAL_SAMPLES) {
-                return "collecting";
+                return "--";
             }
             long[] sortedIntervals = new long[frameIntervalCount];
             for (int index = 0; index < frameIntervalCount; ++index) {
@@ -131,7 +129,7 @@ final class PlaybackDebugOverlay {
             }
             double onePercentLowFps = (worstSampleCount * 1_000_000_000.0)
                     / slowestIntervalTotal;
-            return String.format(java.util.Locale.US, "%.1f fps", onePercentLowFps);
+            return Math.round(onePercentLowFps) + "fps";
         }
     }
 
