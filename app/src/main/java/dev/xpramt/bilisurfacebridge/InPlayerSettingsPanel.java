@@ -50,6 +50,7 @@ final class InPlayerSettingsPanel {
     private final float density;
     private View originalContent;
     private boolean fillBounds;
+    private boolean flush;
     private Object backCallback;
 
     private InPlayerSettingsPanel(Activity activity, Actions actions) {
@@ -69,12 +70,19 @@ final class InPlayerSettingsPanel {
      */
     static void show(Activity activity, Rect bounds, boolean fillBounds, View originalContent,
                      Actions actions) {
+        show(activity, bounds, fillBounds, false, originalContent, actions);
+    }
+
+    /** @param flush no side margin: the cards reach the left and right edge of {@code bounds}. */
+    static void show(Activity activity, Rect bounds, boolean fillBounds, boolean flush,
+                     View originalContent, Actions actions) {
         if (current != null && currentRoot != null) {
             current.close(currentRoot);
         }
         InPlayerSettingsPanel panel = new InPlayerSettingsPanel(activity, actions);
         panel.originalContent = originalContent;
         panel.fillBounds = fillBounds;
+        panel.flush = flush;
         View root = panel.build(bounds);
         if (originalContent != null) {
             // Our cards do not fill the panel; the original rows must not show through.
@@ -112,7 +120,7 @@ final class InPlayerSettingsPanel {
         // No background of its own: only the cards are drawn, like the original panel. Still
         // clickable so a tap between the cards does not count as a tap outside.
         panel.setClickable(true);
-        panel.setPadding(dp(16), 0, dp(16), 0);
+        panel.setPadding(flush ? 0 : dp(16), 0, flush ? 0 : dp(16), 0);
         final FrameLayout.LayoutParams panelParameters = new FrameLayout.LayoutParams(
                 width, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
         root.addView(panel, panelParameters);

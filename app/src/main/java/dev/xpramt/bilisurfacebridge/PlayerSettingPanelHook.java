@@ -259,7 +259,7 @@ final class PlayerSettingPanelHook {
                 if (activity == null) {
                     throw new IllegalStateException("no activity");
                 }
-                InPlayerSettingsPanel.show(activity, listBounds(), true, null,
+                InPlayerSettingsPanel.show(activity, listBounds(), true, true, null,
                         new InPlayerSettingsPanel.Actions() {
                             @Override
                             public void applyRenderer(ModulePreferences.RendererMode mode) {
