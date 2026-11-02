@@ -10,21 +10,27 @@
 
 ## 設定
 
-| 設定 | 作用 |
-|---|---|
-| **直式 Story 影片改用一般影片頁** | 把 `bilibili://story` 連結改道到一般影片路由，並移除 Story 專用的導向參數；不封鎖播放器內的滑動手勢。 |
-| **影片詳情播放器 renderer**（`Texture`／`Surface external`／`Surface`） | 選擇一般影片詳情頁播放器使用 Bilibili 自己的哪一個渲染器。`Texture` 與 `Surface external` 保留 Bilibili 的 external render／transform 路徑（縮放、旋轉、截圖）；直接 `Surface` 跳過它。卡片、廣告、預載與內嵌播放器不受影響。**建議使用 `Surface external`**（理由見下文 2.2）。 |
-| **播放 Debug 浮層** | 僅供診斷：顯示目前渲染器、IJK video-display callback 速率與其滾動 1% low，並開啟量測工具用的遙測與 trace counter。日常使用請關閉。 |
-| **播放影音流浮層** | 在一般播放與直播間頂端顯示一行解碼器確認的視訊格式與所選音訊格式、位元率、取樣率（例如 `HEVC / Hi-Res 96KHz`）。 |
-| **自動挑選最佳音質** | 初始播放時，在播放器提供獨立 DASH 音軌的情況下挑頻寬最高者；單一混流的來源維持 Bilibili 原本的選擇。 |
-| **Media3 Vsync**（預設開啟） | 照 Media3 的方式排程並帶時間戳釋放影片幀，涵蓋 0.5x／1x／2x 倍速，見下文。 |
-| **高通解碼器輸出 fence**（預設開啟） | 設定高通影片解碼器時加入 QTI 軟體輸出 fence 的 vendor key，讓解碼完成的幀更早交出；只在解碼器宣告支援這些 key 時套用（Bilibili 9.13 的解碼器目前沒有宣告，因此實際不會套用）。 |
+設定在模組 App 裡改，也可以**直接在播放器裡改**：全螢幕播放時開右側「更多設定」面板，「播放反饋」那張卡片最上方有一列 **bilibili Ext**，點進去是同一組設定。
 
-所有變更都要完整關閉再重新開啟 Bilibili 才生效。
+| 分組 | 設定 | 作用 | 生效時間 |
+|---|---|---|---|
+| 流暢度 | **影片渲染器**（`Texture`／`Surface external`／`Surface`） | 一般影片詳情頁播放器使用 Bilibili 的哪一個渲染器。`Texture` 與 `Surface external` 保留 Bilibili 的 external render／transform 路徑（縮放、旋轉、截圖）；直接 `Surface` 跳過它。**建議 `Surface external`**（理由見下文 2.2）。 | 立即，畫面會短暫重建 |
+| 流暢度 | **Media3 Vsync**（預設開啟） | 照 Media3 的方式排程並帶時間戳釋放影片幀，涵蓋 0.5x／1x／2x 倍速，見下文。 | 約 1–2 秒 |
+| 流暢度 | **高通解碼器輸出 fence**（預設開啟） | 設定高通影片解碼器時加入 QTI 軟體輸出 fence 的 vendor key，讓解碼完成的幀更早交出；只在解碼器宣告支援這些 key 時套用。 | 下一支影片 |
+| 資訊浮層 | **fps 浮層** | 畫面上顯示一行 `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext`：Media3 Vsync 狀態、平均 fps、1% low、渲染器。fps 是 IJK 實際送幀數，不是螢幕 VSync。 | 立即 |
+| 資訊浮層 | **影音格式** | 解碼器確認的視訊格式與所選音訊格式、位元率、取樣率（例如 `HEVC \| Hi-Res 96KHz`）。與 fps 浮層各自獨立開關，兩項都開時接在同一行。 | 立即 |
+| 資訊浮層 | **水平位置 X／垂直位置 Y** | 浮層位置，從左邊與上緣算起，最大值是實際螢幕寬高（dp）。橫向與直向各存一組。X 沒設定過時置中。 | 立即 |
+| 資訊浮層 | **字體大小** | 1–20 sp。 | 立即 |
+| 音訊 | **自動挑選最佳音質** | 初始播放時，在播放器提供獨立 DASH 音軌的情況下挑頻寬最高者；單一混流的來源維持 Bilibili 原本的選擇。 | 下一支影片 |
+| 頁面行為 | **直式 Story 影片改用一般影片頁** | 把 `bilibili://story` 連結改道到一般影片路由，並移除 Story 專用的導向參數；不封鎖播放器內的滑動手勢。 | 立即 |
+
+在模組 App 裡改的設定，下次開啟 Bilibili 時生效。
+
+在播放器裡改的設定，會存在 Bilibili 自己的資料夾，Bilibili 的所有行程即時共用；同時也會寫回模組 App，讓兩邊一致。寫回需要 Bilibili 看得到模組 App：部分系統（例如 RedMagic）有「讀取應用程式列表」的隱私開關，要替 Bilibili 開啟，否則設定只留在 Bilibili 裡，模組 App 的設定頁不會跟著變（功能不受影響）。
 
 ## 安裝與驗證
 
-模組 APK 在 [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExternal/releases)。**只支援 Bilibili 9.13.0**：原生 Hook 綁定這個版本的 IJK 函式庫（會先核對 build-id 與函式入口，不符就不掛鉤），其他版本只有部分 Java 功能可用。
+模組 APK 在 [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExternal/releases)。**支援 Bilibili 9.13.0 與 9.17.0**：原生 Hook 要在 IJK 函式庫裡找到對應的函式（核對特徵與入口指令，對不上就不掛鉤），其他版本只有部分 Java 功能可用。
 
 ### LSPosed（root）
 
@@ -38,7 +44,7 @@
 
 [NPatch](https://github.com/7723mod/NPatch) 把 Xposed 框架打包進 Bilibili 的 APK。請用**管理器模式**，模組設定才能在模組 App 裡調整（嵌入模式下模組只能用預設值）。以下以 NPatch 1.0.9 實測：
 
-1. 取得 Bilibili **9.13.0** 的 APK。
+1. 取得 Bilibili **9.13.0 或 9.17.0** 的 APK。
 2. 在電腦上修補（需要 Java 17 以上）：
    ```
    java -jar jar-v1.0.9-833-release.jar bilibili-9.13.0.apk --manager -l 2 -o out

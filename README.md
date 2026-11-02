@@ -10,21 +10,27 @@ The module supports Android 7.0 / API 24 and later and registers `dev.xpramt.bil
 
 ## Settings
 
-| Setting | What it does |
-|---|---|
-| **Open Story videos in the normal video page** | Redirects `bilibili://story` links to the ordinary video route and removes the Story-only route flags. Swipe gestures inside a player are not blocked. |
-| **Video-detail renderer** (`Texture` / `Surface external` / `Surface`) | Chooses which of Bilibili's own renderers the normal video-detail player uses. `Texture` and `Surface external` keep Bilibili's external-render/transform path (scale, rotate, capture); direct `Surface` skips it. Cards, ads, preloads and embedded players are unchanged. **`Surface external` is recommended** (see 2.2 below). |
-| **Playback debug overlay** | Diagnostic only: shows the active renderer, the IJK video-display callback rate and its rolling 1 % low, and enables the telemetry and trace counters used by the measurement tools. Leave it off for normal use. |
-| **Playback stream overlay** | Shows one line with the decoder-confirmed video format and the selected audio format, bitrate and sample rate (for example `HEVC / Hi-Res 96KHz`) in normal playback and live rooms. |
-| **Automatically select best audio** | On first playback picks the highest-bandwidth separate DASH audio track when the player exposes one; muxed single streams stay under Bilibili's own selection. |
-| **Media3 Vsync** (default on) | Schedules and timestamps video frames the way Media3 does, at 0.5x / 1x / 2x speed. Described below. |
-| **Qualcomm decoder output fence** (default on) | Adds the QTI software output-fence vendor keys when configuring a Qualcomm video decoder, so decoded frames are handed out earlier. Only applied when the decoder declares those keys (Bilibili 9.13's decoder currently does not, so it is not applied there). |
+Change them in the module app, or **right in the player**: in fullscreen playback open the player's right-hand "More settings" panel; at the top of the "Playback feedback" card there is a row called **bilibili Ext** that opens the same settings.
 
-Every change takes effect after Bilibili is fully closed and reopened.
+| Group | Setting | What it does | Takes effect |
+|---|---|---|---|
+| Smoothness | **Video renderer** (`Texture` / `Surface external` / `Surface`) | Which of Bilibili's own renderers the normal video-detail player uses. `Texture` and `Surface external` keep Bilibili's external-render/transform path (scale, rotate, capture); direct `Surface` skips it. **`Surface external` is recommended** (see 2.2 below). | Immediately; the picture is rebuilt briefly |
+| Smoothness | **Media3 Vsync** (default on) | Schedules and timestamps video frames the way Media3 does, at 0.5x / 1x / 2x speed. Described below. | About 1–2 s |
+| Smoothness | **Qualcomm decoder output fence** (default on) | Adds the QTI software output-fence vendor keys when configuring a Qualcomm video decoder, so decoded frames are handed out earlier. Only applied when the decoder declares those keys. | Next video |
+| Info overlay | **fps overlay** | One line on the picture: `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext` — Media3 Vsync state, average fps, 1 % low, renderer. The fps is what IJK actually delivers, not the screen's VSync. | Immediately |
+| Info overlay | **Stream format** | The decoder-confirmed video format and the selected audio format, bitrate and sample rate (for example `HEVC \| Hi-Res 96KHz`). Switched independently of the fps overlay; with both on they share one line. | Immediately |
+| Info overlay | **Position X / Y** | Where the overlay sits, from the left and top edge, up to the real screen width and height (dp). Landscape and portrait are stored separately. While X was never set the overlay stays centred. | Immediately |
+| Info overlay | **Text size** | 1–20 sp. | Immediately |
+| Audio | **Automatically select best audio** | On first playback picks the highest-bandwidth separate DASH audio track when the player exposes one; muxed single streams stay under Bilibili's own selection. | Next video |
+| Page behaviour | **Open Story videos in the normal video page** | Redirects `bilibili://story` links to the ordinary video route and removes the Story-only route flags. Swipe gestures inside a player are not blocked. | Immediately |
+
+Settings changed in the module app apply the next time Bilibili starts.
+
+Settings changed in the player are kept in Bilibili's own data folder, which all of Bilibili's processes share, and are also written back to the module app so both agree. Writing back needs Bilibili to be able to see the module app: some systems (RedMagic, for one) have a "read the app list" privacy switch that must be turned on for Bilibili. Without it the setting stays inside Bilibili and the module app's settings page does not follow (nothing stops working).
 
 ## Install and verify
 
-The module APK is on [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExternal/releases). **Only Bilibili 9.13.0 is supported**: the native hooks are bound to that version's IJK library (they check its build-id and entry instructions first and do not hook on a mismatch); on other versions only some Java features work.
+The module APK is on [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExternal/releases). **Bilibili 9.13.0 and 9.17.0 are supported**: the native hooks have to find their functions in the IJK library (they check signatures and entry instructions and do not hook on a mismatch); on other versions only some Java features work.
 
 ### LSPosed (root)
 
@@ -38,7 +44,7 @@ The module APK is on [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExte
 
 [NPatch](https://github.com/7723mod/NPatch) packs the Xposed framework into Bilibili's APK. Use **manager mode** so the settings can be changed in the module app (in embedded mode the module only uses its defaults). Tested with NPatch 1.0.9:
 
-1. Get the Bilibili **9.13.0** APK.
+1. Get the Bilibili **9.13.0 or 9.17.0** APK.
 2. Patch it on a computer (Java 17 or later):
    ```
    java -jar jar-v1.0.9-833-release.jar bilibili-9.13.0.apk --manager -l 2 -o out
