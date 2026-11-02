@@ -174,6 +174,20 @@ public final class MainActivity extends Activity {
                         ModulePreferences.setReplaceStoryVideoEnabled(
                                 MainActivity.this, checked));
 
+        // ---- 螢幕資訊（診斷） ----
+        LinearLayout screen = card(content, "螢幕資訊");
+        try {
+            String report = ScreenPhysicalSize.describe(getWindowManager().getDefaultDisplay());
+            android.util.Log.i("BiliSurfaceBridge", "screen info: " + report);
+            startItem(screen);
+            add(screen, text(report, 14, PRIMARY), 0, 12);
+            add(screen, text("螢幕的物理解析度可能比 UI 高（例如 Sony Xperia XZ Premium 的 4K 面板跑 1080p UI）。"
+                    + "這是診斷資訊，不影響其他設定。", 13, DESCRIPTION), 0, 6);
+        } catch (Throwable throwable) {
+            startItem(screen);
+            add(screen, text("無法讀取：" + throwable.getClass().getSimpleName(), 14, PRIMARY), 0, 12);
+        }
+
         setContentView(scroll);
     }
 
