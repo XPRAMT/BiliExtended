@@ -5,7 +5,9 @@ import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.util.DisplayMetrics;
+import android.view.KeyEvent;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -18,7 +20,6 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.lang.ref.WeakReference;
 
 /**
  * The module's settings inside Bilibili's player: a panel on the right edge, drawn here instead of
@@ -40,12 +41,15 @@ final class InPlayerSettingsPanel {
     private static final int CHIP = Color.rgb(46, 55, 65);
     private static final int ON_ACCENT = Color.rgb(16, 20, 24);
 
-    private static WeakReference<View> open;
+    // The panel that is showing, so opening another one closes it properly first.
+    private static InPlayerSettingsPanel current;
+    private static View currentRoot;
 
     private final Activity activity;
     private final Actions actions;
     private final float density;
     private View originalContent;
+    private Object backCallback;
 
     private InPlayerSettingsPanel(Activity activity, Actions actions) {
         this.activity = activity;
@@ -54,9 +58,8 @@ final class InPlayerSettingsPanel {
     }
 
     static void show(Activity activity, Rect bounds, View originalContent, Actions actions) {
-        View existing = open == null ? null : open.get();
-        if (existing != null && existing.getParent() instanceof ViewGroup) {
-            ((ViewGroup) existing.getParent()).removeView(existing);
+        if (current != null && currentRoot != null) {
+            current.close(currentRoot);
         }
         InPlayerSettingsPanel panel = new InPlayerSettingsPanel(activity, actions);
         panel.originalContent = originalContent;
@@ -65,7 +68,8 @@ final class InPlayerSettingsPanel {
             // Our cards do not fill the panel; the original rows must not show through.
             originalContent.setVisibility(View.INVISIBLE);
         }
-        open = new WeakReference<View>(root);
+        current = panel;
+        currentRoot = root;
         activity.addContentView(root, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
@@ -76,6 +80,7 @@ final class InPlayerSettingsPanel {
         final FrameLayout root = new FrameLayout(activity);
         // Above the player's controls, which sit in the same window.
         root.setElevation(dp(48));
+        listenForBack(root);
 
         // Transparent: the video stays as it is, a tap on it just closes the panel.
         View scrim = new View(activity);
@@ -399,12 +404,52 @@ final class InPlayerSettingsPanel {
         return Math.round(value * density);
     }
 
+    /**
+     * Back closes the panel. The root holds the focus (its children cannot take it, or the key
+     * would go to them and not reach us); on Android 13+ the system's back callback is
+     * registered as well, for the case where the app receives back that way.
+     */
+    private void listenForBack(final FrameLayout root) {
+        root.setFocusable(true);
+        root.setFocusableInTouchMode(true);
+        root.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        root.setOnKeyListener((view, keyCode, event) -> {
+            if (keyCode != KeyEvent.KEYCODE_BACK) {
+                return false;
+            }
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                close(root);
+            }
+            return true;
+        });
+        root.post(root::requestFocus);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerBackCallback(root);
+        }
+    }
+
+    private void registerBackCallback(final View root) {
+        android.window.OnBackInvokedCallback callback = () -> close(root);
+        backCallback = callback;
+        activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback);
+    }
+
     private void close(View root) {
+        if (backCallback != null && Build.VERSION.SDK_INT >= 33) {
+            activity.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
+                    (android.window.OnBackInvokedCallback) backCallback);
+            backCallback = null;
+        }
         if (root.getParent() instanceof ViewGroup) {
             ((ViewGroup) root.getParent()).removeView(root);
         }
         if (originalContent != null) {
             originalContent.setVisibility(View.VISIBLE);
+        }
+        if (current == this) {
+            current = null;
+            currentRoot = null;
         }
     }
 
