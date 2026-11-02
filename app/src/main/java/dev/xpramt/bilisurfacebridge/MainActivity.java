@@ -183,6 +183,19 @@ public final class MainActivity extends Activity {
             add(screen, text(report, 14, PRIMARY), 0, 12);
             add(screen, text("螢幕的物理解析度可能比 UI 高（例如 Sony Xperia XZ Premium 的 4K 面板跑 1080p UI）。"
                     + "這是診斷資訊，不影響其他設定。", 13, DESCRIPTION), 0, 6);
+            if (ScreenPhysicalSize.hasHiddenResolution(getWindowManager().getDefaultDisplay())) {
+                TextView test = text("4K 輸出測試（全螢幕，點一下關閉）", 16, Color.rgb(16, 20, 24));
+                test.setGravity(Gravity.CENTER);
+                test.setPadding(dp(16), dp(12), dp(16), dp(12));
+                android.graphics.drawable.GradientDrawable background =
+                        new android.graphics.drawable.GradientDrawable();
+                background.setColor(ACCENT);
+                background.setCornerRadius(dp(12));
+                test.setBackground(background);
+                test.setOnClickListener(view -> startActivity(
+                        new android.content.Intent(MainActivity.this, FourKTestActivity.class)));
+                add(screen, test, 0, 12);
+            }
         } catch (Throwable throwable) {
             startItem(screen);
             add(screen, text("無法讀取：" + throwable.getClass().getSimpleName(), 14, PRIMARY), 0, 12);
