@@ -65,7 +65,7 @@ final class PlaybackDebugOverlay {
     private PlaybackDebugOverlay(Activity activity) {
         label = new OutlinedTextView(activity);
         label.setTextColor(Color.WHITE);
-        label.setTextSize(11.0f);
+        label.setTextSize(9.0f);
         label.setOutlineWidthPx(dp(activity, 1));
         label.setGravity(Gravity.CENTER);
         label.setPadding(dp(activity, 2), dp(activity, 1), dp(activity, 2), dp(activity, 1));
