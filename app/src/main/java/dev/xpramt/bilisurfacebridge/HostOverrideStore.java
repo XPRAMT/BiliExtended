@@ -22,10 +22,12 @@ import de.robv.android.xposed.XposedHelpers;
 /**
  * Settings changed from inside Bilibili, kept in a file in Bilibili's own data folder.
  *
- * <p>The module app owns the real preferences and Bilibili cannot always reach it (on some
- * phones its provider cannot be found from Bilibili at all), and Bilibili's processes cannot
- * share memory, so a change made in the main process has to reach the IJK service some other
- * way. Every Bilibili process reads this file (re-checked once a second).
+ * <p>The module app owns the real preferences. This file is only the stand-in until a change
+ * has reached it: while the provider write is in flight, and for good where the module app cannot
+ * be reached at all (embedded patching without the module app installed, or a phone where the
+ * provider is not visible from Bilibili). Once the provider write succeeds the entry is removed.
+ * Bilibili's processes cannot share memory, so every one of them reads this file (re-checked
+ * once a second).
  *
  * <p>An entry stores the module's own value at the time of the change. While the module's value
  * is still that one the entry wins; once the module's value differs (the user changed it in the
@@ -56,6 +58,22 @@ final class HostOverrideStore {
         synchronized (LOCK) {
             refreshLocked();
             return entries.get(key);
+        }
+    }
+
+    /** Drops an entry once the module app holds the value (the provider write went through). */
+    static void remove(String key) {
+        synchronized (LOCK) {
+            refreshLocked();
+            if (entries.remove(key) != null && !flushPending) {
+                flushPending = true;
+                FLUSHER.schedule(new Runnable() {
+                    @Override
+                    public void run() {
+                        flush();
+                    }
+                }, FLUSH_DELAY_MS, TimeUnit.MILLISECONDS);
+            }
         }
     }
 

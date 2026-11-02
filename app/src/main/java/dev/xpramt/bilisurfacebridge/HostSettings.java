@@ -69,6 +69,10 @@ final class HostSettings {
                             key, extras);
                     if (result == null || !result.getBoolean("ok")) {
                         XposedBridge.log("BiliSurfaceBridge: setting " + key + " was not applied");
+                    } else {
+                        // The module app has it now: it alone is the source again.
+                        ModulePreferences.refreshProviderSnapshot();
+                        HostOverrideStore.remove(key);
                     }
                 } catch (Throwable throwable) {
                     String why = "";

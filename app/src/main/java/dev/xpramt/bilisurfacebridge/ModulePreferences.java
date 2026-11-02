@@ -477,39 +477,40 @@ final class ModulePreferences {
 
     // The hooks read preferences several times per video frame on the IJK release thread;
     // parsing the XML each time cost CPU and garbage in the hot path (GC bursts starved the
-    // pipeline threads).  One instance, re-read at most every two seconds.
+    // pipeline threads).  Reads come from an in-memory view re-checked at most every two seconds.
+    //
+    // One source of truth: the module app's own preferences, read live through its provider.
+    // The copy a framework keeps for XSharedPreferences (LSPosed/Vector sync it only when it
+    // feels like it, so it can be stale) is only the fallback for when the provider cannot be
+    // reached; settings changed inside Bilibili that could not be written to the module app
+    // live in HostOverrideStore (see there).
     private static final long HOOK_PREFERENCES_TTL_NS = 2_000_000_000L;
+    private static final long PROVIDER_RETRY_NS = 10_000_000_000L;
     private static XSharedPreferences cachedHookPreferences;
     private static long cachedHookPreferencesNs;
-    // NPatch manager mode points XSharedPreferences at this app's private directory, which
-    // Bilibili cannot read; the module app then serves a snapshot via ModulePreferencesProvider.
     private static volatile SharedPreferences providerSnapshot;
     private static volatile boolean providerRefreshRunning;
+    private static volatile long providerCheckedNs;
+    private static volatile boolean providerApplicationMissing;
 
     private static synchronized SharedPreferences hookPreferences() {
         long now = System.nanoTime();
-        boolean stale = cachedHookPreferences == null
-                || now - cachedHookPreferencesNs > HOOK_PREFERENCES_TTL_NS;
-        if (stale) {
-            if (cachedHookPreferences == null) {
-                cachedHookPreferences = new XSharedPreferences(PACKAGE_NAME, PREFS_NAME);
-            }
-            cachedHookPreferences.reload();
-            cachedHookPreferencesNs = now;
-        }
-        if (cachedHookPreferences.getFile().canRead()) {
-            return HOOK_VIEW.delegateTo(cachedHookPreferences);
-        }
         SharedPreferences snapshot = providerSnapshot;
         if (snapshot == null) {
-            // First read: synchronous, so startup hooks see the user's settings.
-            snapshot = readProviderSnapshot();
-            if (snapshot != null) {
-                providerSnapshot = snapshot;
+            if (providerCheckedNs == 0 || now - providerCheckedNs > PROVIDER_RETRY_NS) {
+                // Synchronous, so startup hooks see the user's settings. Before the Application
+                // exists nothing was tried, so the next read tries again at once.
+                providerApplicationMissing = false;
+                snapshot = readProviderSnapshot();
+                providerCheckedNs = providerApplicationMissing ? 0 : now;
+                if (snapshot != null) {
+                    providerSnapshot = snapshot;
+                }
             }
-        } else if (stale && !providerRefreshRunning) {
+        } else if (now - providerCheckedNs > HOOK_PREFERENCES_TTL_NS && !providerRefreshRunning) {
             // Later refreshes stay off the hot path: the provider call may start the module
             // app's process.
+            providerCheckedNs = now;
             providerRefreshRunning = true;
             Thread refresh = new Thread(() -> {
                 try {
@@ -524,7 +525,29 @@ final class ModulePreferences {
             refresh.setDaemon(true);
             refresh.start();
         }
-        return HOOK_VIEW.delegateTo(snapshot != null ? snapshot : cachedHookPreferences);
+        if (snapshot != null) {
+            return HOOK_VIEW.delegateTo(snapshot);
+        }
+        // Provider unreachable: the framework's copy of the file, if this process can read it.
+        boolean stale = cachedHookPreferences == null
+                || now - cachedHookPreferencesNs > HOOK_PREFERENCES_TTL_NS;
+        if (cachedHookPreferences == null) {
+            cachedHookPreferences = new XSharedPreferences(PACKAGE_NAME, PREFS_NAME);
+        }
+        if (stale) {
+            cachedHookPreferences.reload();
+            cachedHookPreferencesNs = now;
+        }
+        return HOOK_VIEW.delegateTo(cachedHookPreferences);
+    }
+
+    /** Re-reads the provider now, so a value just written to the module app is what hooks see. */
+    static void refreshProviderSnapshot() {
+        SharedPreferences fresh = readProviderSnapshot();
+        if (fresh != null) {
+            providerSnapshot = fresh;
+            providerCheckedNs = System.nanoTime();
+        }
     }
 
     // Values the in-player menu changed, kept by HostOverrideStore: the module app owns the
@@ -642,6 +665,7 @@ final class ModulePreferences {
             Object application = Class.forName("android.app.ActivityThread")
                     .getMethod("currentApplication").invoke(null);
             if (!(application instanceof Context)) {
+                providerApplicationMissing = true;
                 return null;
             }
             android.os.Bundle bundle = ((Context) application).getContentResolver().call(
