@@ -27,7 +27,7 @@ final class ModulePreferences {
     static final String KEY_REPLACE_STORY_VIDEO = "replace_story_video";
     static final String KEY_OVERLAY_TOP_MARGIN_DP = "overlay_top_margin_dp";
     static final int DEFAULT_OVERLAY_TOP_MARGIN_DP = 12;
-    static final int MIN_OVERLAY_TOP_MARGIN_DP = 1;
+    static final int MIN_OVERLAY_TOP_MARGIN_DP = 0;
     static final int MAX_OVERLAY_TOP_MARGIN_DP = 100;
     static final boolean DEFAULT_PLAYBACK_DEBUG_OVERLAY = false;
     static final boolean DEFAULT_PLAYBACK_STREAM_OVERLAY = false;

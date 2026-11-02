@@ -121,7 +121,7 @@ public final class MainActivity extends Activity {
         LinearLayout overlay = card(content, "資訊浮層");
 
         final TextView marginLabel = text("", 16, PRIMARY);
-        final TextView marginNote = text("1～100 dp，放開即套用；只作用於 fps 浮層。", 13, DESCRIPTION);
+        final TextView marginNote = text("0～100 dp，放開即套用；只作用於 fps 浮層。", 13, DESCRIPTION);
         final SeekBar marginSlider = new SeekBar(this);
         // SeekBar has no minimum before API 26: progress 0 is MIN dp.
         final int minMargin = ModulePreferences.MIN_OVERLAY_TOP_MARGIN_DP;
