@@ -49,6 +49,7 @@ final class InPlayerSettingsPanel {
     private final Actions actions;
     private final float density;
     private View originalContent;
+    private boolean fillBounds;
     private Object backCallback;
 
     private InPlayerSettingsPanel(Activity activity, Actions actions) {
@@ -58,11 +59,22 @@ final class InPlayerSettingsPanel {
     }
 
     static void show(Activity activity, Rect bounds, View originalContent, Actions actions) {
+        show(activity, bounds, false, originalContent, actions);
+    }
+
+    /**
+     * @param fillBounds true to also take the height and top of {@code bounds}: the bottom-sheet
+     *                   menu's panel sits exactly where that menu was; the right-hand panel only
+     *                   copies the width and left edge.
+     */
+    static void show(Activity activity, Rect bounds, boolean fillBounds, View originalContent,
+                     Actions actions) {
         if (current != null && currentRoot != null) {
             current.close(currentRoot);
         }
         InPlayerSettingsPanel panel = new InPlayerSettingsPanel(activity, actions);
         panel.originalContent = originalContent;
+        panel.fillBounds = fillBounds;
         View root = panel.build(bounds);
         if (originalContent != null) {
             // Our cards do not fill the panel; the original rows must not show through.
@@ -110,6 +122,11 @@ final class InPlayerSettingsPanel {
                     panelParameters.gravity = Gravity.START;
                     panelParameters.width = bounds.width();
                     panelParameters.leftMargin = bounds.left - origin[0];
+                    if (fillBounds) {
+                        panelParameters.gravity = Gravity.START | Gravity.TOP;
+                        panelParameters.height = bounds.height();
+                        panelParameters.topMargin = bounds.top - origin[1];
+                    }
                     panel.setLayoutParams(panelParameters);
                 }
             });

@@ -258,6 +258,28 @@ final class PlayerSettingPanelHook {
             return constructor.newInstance(args);
         }
 
+        /** The bottom sheet's content area on screen (view id content_layout), or null. */
+        private static Rect sheetBounds(android.app.Dialog dialog, Activity activity) {
+            try {
+                if (dialog.getWindow() == null) {
+                    return null;
+                }
+                int id = activity.getResources().getIdentifier("content_layout", "id",
+                        activity.getPackageName());
+                View view = id == 0 ? null : dialog.getWindow().getDecorView().findViewById(id);
+                if (view == null || !view.isAttachedToWindow() || view.getWidth() <= 0) {
+                    return null;
+                }
+                int[] location = new int[2];
+                view.getLocationOnScreen(location);
+                return new Rect(location[0], location[1],
+                        location[0] + view.getWidth(), location[1] + view.getHeight());
+            } catch (Throwable throwable) {
+                logOnce("dialog-bounds", throwable);
+                return null;
+            }
+        }
+
         private static void openFromDialog() {
             try {
                 Activity activity = topActivity == null ? null : topActivity.get();
@@ -265,10 +287,12 @@ final class PlayerSettingPanelHook {
                     throw new IllegalStateException("no activity");
                 }
                 android.app.Dialog dialog = lastDialog == null ? null : lastDialog.get();
+                // Where the menu sits now, read before it closes: the panel takes its place.
+                Rect sheet = dialog == null ? null : sheetBounds(dialog, activity);
                 if (dialog != null && dialog.isShowing()) {
                     dialog.dismiss();
                 }
-                InPlayerSettingsPanel.show(activity, null, null,
+                InPlayerSettingsPanel.show(activity, sheet, true, null,
                         new InPlayerSettingsPanel.Actions() {
                             @Override
                             public void applyRenderer(ModulePreferences.RendererMode mode) {
