@@ -176,6 +176,11 @@ final class PlayerSettingPanelHook {
                 return;
             }
             List<?> original = (List<?>) param.args[0];
+            if (hasTitle(original)) {
+                // The full-screen panel's rows go through this adapter too, and its own hook has
+                // already added the entry there.
+                return;
+            }
             int lastSwitch = -1;
             for (int index = 0; index < original.size(); index++) {
                 if (switchRow.isInstance(original.get(index))) {
@@ -202,6 +207,42 @@ final class PlayerSettingPanelHook {
             List<Object> merged = new ArrayList<>(original);
             merged.add(anchor + 1, ourComponent);
             param.args[0] = merged;
+        }
+
+        /** True when some row (or its data object) already carries our title. */
+        private static boolean hasTitle(List<?> rows) {
+            for (Object row : rows) {
+                if (row == null) {
+                    continue;
+                }
+                for (Field field : row.getClass().getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                        continue;
+                    }
+                    try {
+                        field.setAccessible(true);
+                        Object value = field.get(row);
+                        if (ROW_TITLE.equals(value)) {
+                            return true;
+                        }
+                        if (value != null && value.getClass().getName().startsWith("com.bilibili")) {
+                            for (Field inner : value.getClass().getDeclaredFields()) {
+                                if (java.lang.reflect.Modifier.isStatic(inner.getModifiers())
+                                        || inner.getType() != String.class) {
+                                    continue;
+                                }
+                                inner.setAccessible(true);
+                                if (ROW_TITLE.equals(inner.get(value))) {
+                                    return true;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                        // Unreadable field: not a title holder.
+                    }
+                }
+            }
+            return false;
         }
 
         /** A data object for our row, taking the arrow icon and style from the anchor row. */
