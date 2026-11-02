@@ -1,6 +1,7 @@
 package dev.xpramt.bilisurfacebridge;
 
 import android.app.Activity;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
@@ -44,10 +45,17 @@ final class PlaybackDebugOverlay {
     private long previousFrameCount;
     private long previousSampleTime;
 
-    private int appliedTopMarginDp = -1;
+    private int appliedX = Integer.MIN_VALUE;
+    private int appliedY = -1;
+    private int appliedTextSizeSp = -1;
 
     private void applyState() {
         renderText();
+    }
+
+    private boolean landscape() {
+        return label.getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
     }
 
     /** Applies a changed setting right away instead of at the next one-second tick. */
@@ -64,17 +72,51 @@ final class PlaybackDebugOverlay {
         }
     }
 
-    private void applyTopMargin() {
-        int marginDp = ModulePreferences.loadOverlayTopMarginDpForHook();
-        if (marginDp == appliedTopMarginDp) {
+    /**
+     * Where the overlay's left edge is now, in dp: the stored X, or, while it is still centred,
+     * wherever the centring put it, so a slider can start from what is on screen.
+     */
+    static int currentXDp(Activity activity, boolean landscape, int fallbackDp) {
+        int stored = ModulePreferences.loadOverlayXDpForHook(landscape);
+        if (stored >= 0) {
+            return stored;
+        }
+        PlaybackDebugOverlay overlay = OVERLAYS.get(activity);
+        if (overlay != null && overlay.label.getWidth() > 0) {
+            return Math.round(overlay.label.getLeft()
+                    / overlay.label.getResources().getDisplayMetrics().density);
+        }
+        return fallbackDp;
+    }
+
+    /** Position (X from the left, Y from the top, dp, per orientation) and text size. */
+    private void applyLayout() {
+        int sp = ModulePreferences.loadOverlayTextSizeSpForHook();
+        if (sp != appliedTextSizeSp) {
+            appliedTextSizeSp = sp;
+            label.setTextSize(sp);
+        }
+        boolean landscape = landscape();
+        int x = ModulePreferences.loadOverlayXDpForHook(landscape);
+        int y = ModulePreferences.loadOverlayYDpForHook(landscape);
+        if (x == appliedX && y == appliedY) {
             return;
         }
-        appliedTopMarginDp = marginDp;
+        appliedX = x;
+        appliedY = y;
         ViewGroup.LayoutParams parameters = label.getLayoutParams();
         if (parameters instanceof FrameLayout.LayoutParams) {
-            ((FrameLayout.LayoutParams) parameters).topMargin =
-                    Math.round(marginDp * label.getResources().getDisplayMetrics().density);
-            label.setLayoutParams(parameters);
+            FrameLayout.LayoutParams layout = (FrameLayout.LayoutParams) parameters;
+            float density = label.getResources().getDisplayMetrics().density;
+            layout.topMargin = Math.round(y * density);
+            if (x == ModulePreferences.OVERLAY_X_UNSET) {
+                layout.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+                layout.leftMargin = 0;
+            } else {
+                layout.gravity = Gravity.TOP | Gravity.START;
+                layout.leftMargin = Math.round(x * density);
+            }
+            label.setLayoutParams(layout);
         }
     }
 
@@ -101,7 +143,7 @@ final class PlaybackDebugOverlay {
         }
         label.setText(text);
         label.setVisibility(text.length() > 0 ? View.VISIBLE : View.GONE);
-        applyTopMargin();
+        applyLayout();
     }
 
     private final Runnable update = new Runnable() {
@@ -121,7 +163,7 @@ final class PlaybackDebugOverlay {
     private PlaybackDebugOverlay(Activity activity) {
         label = new OutlinedTextView(activity);
         label.setTextColor(Color.WHITE);
-        label.setTextSize(9.0f);
+        label.setTextSize(ModulePreferences.loadOverlayTextSizeSpForHook());
         label.setOutlineWidthPx(dp(activity, 1));
         label.setGravity(Gravity.CENTER);
         label.setPadding(dp(activity, 2), dp(activity, 1), dp(activity, 2), dp(activity, 1));
@@ -131,7 +173,7 @@ final class PlaybackDebugOverlay {
         FrameLayout.LayoutParams parameters = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        parameters.topMargin = dp(activity, ModulePreferences.loadOverlayTopMarginDpForHook());
+        parameters.topMargin = dp(activity, ModulePreferences.loadOverlayYDpForHook(false));
         activity.addContentView(label, parameters);
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             try {

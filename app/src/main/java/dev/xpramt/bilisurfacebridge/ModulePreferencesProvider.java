@@ -110,9 +110,12 @@ public final class ModulePreferencesProvider extends ContentProvider {
             ModulePreferences.setVideoDetailRendererMode(context, mode);
             return true;
         }
-        if (value instanceof Integer && ModulePreferences.KEY_OVERLAY_TOP_MARGIN_DP.equals(key)) {
-            ModulePreferences.setOverlayTopMarginDp(context, (Integer) value);
-            return true;
+        if (value instanceof Integer) {
+            if (ModulePreferences.KEY_OVERLAY_TOP_MARGIN_DP.equals(key)) {
+                ModulePreferences.setOverlayTopMarginDp(context, (Integer) value);
+                return true;
+            }
+            return ModulePreferences.setOverlayInt(context, key, (Integer) value);
         }
         return false;
     }

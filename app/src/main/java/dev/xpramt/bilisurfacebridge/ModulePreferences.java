@@ -31,6 +31,19 @@ final class ModulePreferences {
     static final int DEFAULT_OVERLAY_TOP_MARGIN_DP = 12;
     static final int MIN_OVERLAY_TOP_MARGIN_DP = 0;
     static final int MAX_OVERLAY_TOP_MARGIN_DP = 100;
+    // Overlay position: X from the left edge, Y from the top edge, in dp, stored per orientation
+    // because the screen is a different size. X unset (-1) keeps the overlay centred.
+    static final String KEY_OVERLAY_X_LAND = "overlay_x_dp_land";
+    static final String KEY_OVERLAY_Y_LAND = "overlay_y_dp_land";
+    static final String KEY_OVERLAY_X_PORT = "overlay_x_dp_port";
+    static final String KEY_OVERLAY_Y_PORT = "overlay_y_dp_port";
+    static final String KEY_OVERLAY_TEXT_SIZE_SP = "overlay_text_size_sp";
+    static final int OVERLAY_X_UNSET = -1;
+    /** Sanity bound only: the sliders stop at the real screen size. */
+    static final int MAX_OVERLAY_POSITION_DP = 4000;
+    static final int DEFAULT_OVERLAY_TEXT_SIZE_SP = 9;
+    static final int MIN_OVERLAY_TEXT_SIZE_SP = 1;
+    static final int MAX_OVERLAY_TEXT_SIZE_SP = 20;
     static final boolean DEFAULT_PLAYBACK_DEBUG_OVERLAY = false;
     static final boolean DEFAULT_PLAYBACK_STREAM_OVERLAY = false;
     static final boolean DEFAULT_AUTO_SELECT_BEST_AUDIO = false;
@@ -131,6 +144,82 @@ final class ModulePreferences {
 
     private static int clampOverlayTopMargin(int dp) {
         return Math.max(MIN_OVERLAY_TOP_MARGIN_DP, Math.min(MAX_OVERLAY_TOP_MARGIN_DP, dp));
+    }
+
+    static String overlayXKey(boolean landscape) {
+        return landscape ? KEY_OVERLAY_X_LAND : KEY_OVERLAY_X_PORT;
+    }
+
+    static String overlayYKey(boolean landscape) {
+        return landscape ? KEY_OVERLAY_Y_LAND : KEY_OVERLAY_Y_PORT;
+    }
+
+    /** -1 when never set (centred). */
+    static int getOverlayXDp(Context context, boolean landscape) {
+        int value = preferences(context).getInt(overlayXKey(landscape), OVERLAY_X_UNSET);
+        return value < 0 ? OVERLAY_X_UNSET : Math.min(value, MAX_OVERLAY_POSITION_DP);
+    }
+
+    /** Falls back to the single top margin this setting replaced. */
+    static int getOverlayYDp(Context context, boolean landscape) {
+        return clampPosition(preferences(context).getInt(
+                overlayYKey(landscape), getOverlayTopMarginDp(context)));
+    }
+
+    static int getOverlayTextSizeSp(Context context) {
+        return clampTextSize(preferences(context).getInt(
+                KEY_OVERLAY_TEXT_SIZE_SP, DEFAULT_OVERLAY_TEXT_SIZE_SP));
+    }
+
+    /** Stores one of the overlay position / size settings; false for any other key. */
+    static boolean setOverlayInt(Context context, String key, int value) {
+        int stored;
+        if (KEY_OVERLAY_X_LAND.equals(key) || KEY_OVERLAY_X_PORT.equals(key)) {
+            stored = value < 0 ? OVERLAY_X_UNSET : Math.min(value, MAX_OVERLAY_POSITION_DP);
+        } else if (KEY_OVERLAY_Y_LAND.equals(key) || KEY_OVERLAY_Y_PORT.equals(key)) {
+            stored = clampPosition(value);
+        } else if (KEY_OVERLAY_TEXT_SIZE_SP.equals(key)) {
+            stored = clampTextSize(value);
+        } else {
+            return false;
+        }
+        commitPreferences(context, preferences(context).edit().putInt(key, stored));
+        return true;
+    }
+
+    static int loadOverlayXDpForHook(boolean landscape) {
+        try {
+            int value = hookPreferences().getInt(overlayXKey(landscape), OVERLAY_X_UNSET);
+            return value < 0 ? OVERLAY_X_UNSET : Math.min(value, MAX_OVERLAY_POSITION_DP);
+        } catch (Throwable ignored) {
+            return OVERLAY_X_UNSET;
+        }
+    }
+
+    static int loadOverlayYDpForHook(boolean landscape) {
+        try {
+            return clampPosition(hookPreferences().getInt(
+                    overlayYKey(landscape), loadOverlayTopMarginDpForHook()));
+        } catch (Throwable ignored) {
+            return DEFAULT_OVERLAY_TOP_MARGIN_DP;
+        }
+    }
+
+    static int loadOverlayTextSizeSpForHook() {
+        try {
+            return clampTextSize(hookPreferences().getInt(
+                    KEY_OVERLAY_TEXT_SIZE_SP, DEFAULT_OVERLAY_TEXT_SIZE_SP));
+        } catch (Throwable ignored) {
+            return DEFAULT_OVERLAY_TEXT_SIZE_SP;
+        }
+    }
+
+    private static int clampPosition(int dp) {
+        return Math.max(0, Math.min(MAX_OVERLAY_POSITION_DP, dp));
+    }
+
+    private static int clampTextSize(int sp) {
+        return Math.max(MIN_OVERLAY_TEXT_SIZE_SP, Math.min(MAX_OVERLAY_TEXT_SIZE_SP, sp));
     }
 
     static boolean isReplaceStoryVideoEnabled(Context context) {

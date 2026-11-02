@@ -147,7 +147,7 @@ final class InPlayerSettingsPanel {
         switchRow(card, "影音格式", "例如 HEVC | Hi-Res 96KHz；只管顯示或隱藏，兩項都開時顯示在同一行。",
                 ModulePreferences.loadPlaybackStreamOverlayForHook(),
                 ModulePreferences.KEY_PLAYBACK_STREAM_OVERLAY, enabled -> PlaybackDebugOverlay.refreshAll());
-        marginRow(card);
+        positionRows(card);
     }
 
     private void audio(LinearLayout card) {
@@ -237,30 +237,69 @@ final class InPlayerSettingsPanel {
         }
     }
 
-    /** A slider that applies as it moves, with − and + for single steps. */
-    private void marginRow(LinearLayout card) {
+    private interface IntAction {
+        void run(int value);
+    }
+
+    private boolean landscape() {
+        return activity.getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+    }
+
+    /** X and Y of the overlay, each up to the real screen size; kept per orientation. */
+    private void positionRows(LinearLayout card) {
+        final boolean landscape = landscape();
+        DisplayMetrics metrics = activity.getResources().getDisplayMetrics();
+        int widthDp = Math.round(metrics.widthPixels / metrics.density);
+        int heightDp = Math.round(metrics.heightPixels / metrics.density);
+        final String xKey = ModulePreferences.overlayXKey(landscape);
+        final String yKey = ModulePreferences.overlayYKey(landscape);
+        String orientation = landscape ? "橫向" : "直向";
+        sliderRow(card, "水平位置 X", "dp", 0, widthDp,
+                PlaybackDebugOverlay.currentXDp(activity, landscape, widthDp / 3),
+                live(xKey), save(xKey),
+                "從左邊算起，最大是螢幕寬度；" + orientation + "與另一個方向分開儲存。");
+        sliderRow(card, "垂直位置 Y", "dp", 0, heightDp,
+                ModulePreferences.loadOverlayYDpForHook(landscape),
+                live(yKey), save(yKey), "從上緣算起，最大是螢幕高度。");
+        sliderRow(card, "字體大小", "sp", ModulePreferences.MIN_OVERLAY_TEXT_SIZE_SP,
+                ModulePreferences.MAX_OVERLAY_TEXT_SIZE_SP,
+                ModulePreferences.loadOverlayTextSizeSpForHook(),
+                live(ModulePreferences.KEY_OVERLAY_TEXT_SIZE_SP),
+                save(ModulePreferences.KEY_OVERLAY_TEXT_SIZE_SP), null);
+    }
+
+    /** Applies while dragging, without a write per step. */
+    private IntAction live(final String key) {
+        return value -> {
+            ModulePreferences.setHostOverride(key, value);
+            PlaybackDebugOverlay.refreshAll();
+        };
+    }
+
+    /** Written to the module app when the finger lifts or a step button is pressed. */
+    private IntAction save(final String key) {
+        return value -> HostSettings.write(key, value);
+    }
+
+    /** A slider with a label, small − and + for single steps, and an optional note. */
+    private void sliderRow(LinearLayout card, final String name, final String unit, final int min,
+                           final int max, int initial, final IntAction live, final IntAction save,
+                           String note) {
         startRow(card);
-        final int min = ModulePreferences.MIN_OVERLAY_TOP_MARGIN_DP;
-        final int max = ModulePreferences.MAX_OVERLAY_TOP_MARGIN_DP;
         final TextView label = text("", 17, PRIMARY);
         card.addView(label, matchWrap(4));
         final SeekBar slider = new SeekBar(activity);
-        slider.setMax(max - min);
-        slider.setPadding(dp(8), dp(10), dp(8), dp(10));
-        final int start = ModulePreferences.loadOverlayTopMarginDpForHook();
+        slider.setMax(Math.max(1, max - min));
+        slider.setPadding(dp(6), dp(8), dp(6), dp(8));
+        final int start = Math.max(min, Math.min(max, initial));
         slider.setProgress(start - min);
-        label.setText(marginText(start));
-
-        final Runnable save = () -> HostSettings.write(ModulePreferences.KEY_OVERLAY_TOP_MARGIN_DP,
-                slider.getProgress() + min);
+        label.setText(valueText(name, start, unit));
         slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                int dp = progress + min;
-                label.setText(marginText(dp));
-                ModulePreferences.setHostOverride(
-                        ModulePreferences.KEY_OVERLAY_TOP_MARGIN_DP, dp);
-                PlaybackDebugOverlay.refreshAll();
+                label.setText(valueText(name, progress + min, unit));
+                live.run(progress + min);
             }
 
             @Override
@@ -269,7 +308,7 @@ final class InPlayerSettingsPanel {
 
             @Override
             public void onStopTrackingTouch(SeekBar bar) {
-                save.run();
+                save.run(bar.getProgress() + min);
             }
         });
 
@@ -278,30 +317,34 @@ final class InPlayerSettingsPanel {
         line.setGravity(Gravity.CENTER_VERTICAL);
         line.addView(stepButton("−", () -> {
             slider.setProgress(Math.max(0, slider.getProgress() - 1));
-            save.run();
+            save.run(slider.getProgress() + min);
         }));
         line.addView(slider, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        line.addView(stepButton("＋", () -> {
+        line.addView(stepButton("+", () -> {
             slider.setProgress(Math.min(slider.getMax(), slider.getProgress() + 1));
-            save.run();
+            save.run(slider.getProgress() + min);
         }));
         card.addView(line, matchWrap(0));
-        card.addView(text("浮層的位置；拖動時即時改變。", 13, DESCRIPTION), matchWrap(2));
+        if (note != null) {
+            card.addView(text(note, 13, DESCRIPTION), matchWrap(2));
+        }
     }
 
+    private static String valueText(String name, int value, String unit) {
+        return name + "　" + value + " " + unit;
+    }
+
+    /** A small round button. */
     private TextView stepButton(String symbol, final Runnable action) {
-        TextView button = text(symbol, 20, PRIMARY);
+        TextView button = text(symbol, 18, PRIMARY);
         button.setGravity(Gravity.CENTER);
-        button.setBackground(rounded(CHIP, 12));
-        button.setMinWidth(dp(46));
-        button.setMinHeight(dp(46));
+        button.setIncludeFontPadding(false);
+        button.setBackground(rounded(CHIP, 17));
+        button.setWidth(dp(34));
+        button.setHeight(dp(34));
         button.setOnClickListener(v -> action.run());
         return button;
-    }
-
-    private static String marginText(int dp) {
-        return "浮層距離頂端　" + dp + " dp";
     }
 
     // ---- building blocks ----------------------------------------------------------------

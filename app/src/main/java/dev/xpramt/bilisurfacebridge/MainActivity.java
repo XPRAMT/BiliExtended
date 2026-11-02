@@ -120,48 +120,42 @@ public final class MainActivity extends Activity {
         // ---- 資訊浮層 ----
         LinearLayout overlay = card(content, "資訊浮層");
 
-        final TextView marginLabel = text("", 16, PRIMARY);
-        final TextView marginNote = text("0～100 dp，放開即套用；浮層的位置。", 13, DESCRIPTION);
-        final SeekBar marginSlider = new SeekBar(this);
-        // SeekBar has no minimum before API 26: progress 0 is MIN dp.
-        final int minMargin = ModulePreferences.MIN_OVERLAY_TOP_MARGIN_DP;
-        marginSlider.setMax(ModulePreferences.MAX_OVERLAY_TOP_MARGIN_DP - minMargin);
-        marginSlider.setProgress(ModulePreferences.getOverlayTopMarginDp(this) - minMargin);
-        marginLabel.setText(marginText(marginSlider.getProgress() + minMargin));
-        marginSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                marginLabel.setText(marginText(progress + minMargin));
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar bar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar bar) {
-                ModulePreferences.setOverlayTopMarginDp(
-                        MainActivity.this, bar.getProgress() + minMargin);
-            }
-        });
-
-        boolean fpsOverlayOn = ModulePreferences.isPlaybackDebugOverlayEnabled(this);
         switchRow(overlay, "fps 浮層", "畫面頂端：On | Avg 120fps | 1%Low 83fps | Surface Ext。",
-                fpsOverlayOn, (button, checked) -> {
-                    ModulePreferences.setPlaybackDebugOverlayEnabled(MainActivity.this, checked);
-                    setMarginControlsEnabled(marginLabel, marginNote, marginSlider, checked);
-                });
+                ModulePreferences.isPlaybackDebugOverlayEnabled(this),
+                (button, checked) ->
+                        ModulePreferences.setPlaybackDebugOverlayEnabled(
+                                MainActivity.this, checked));
         switchRow(overlay, "影音格式", "例如 HEVC | Hi-Res 96KHz；單獨控制，兩項都開時顯示在同一行。",
                 ModulePreferences.isPlaybackStreamOverlayEnabled(this),
                 (button, checked) ->
                         ModulePreferences.setPlaybackStreamOverlayEnabled(
                                 MainActivity.this, checked));
 
-        startItem(overlay);
-        add(overlay, marginLabel, 0, 12);
-        add(overlay, marginNote, 0, 2);
-        add(overlay, marginSlider, 0, 6);
-        setMarginControlsEnabled(marginLabel, marginNote, marginSlider, fpsOverlayOn);
+        // Position per orientation, up to the real screen size of the orientation shown now.
+        final boolean landscape = getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        final int widthDp = Math.round(getResources().getDisplayMetrics().widthPixels
+                / getResources().getDisplayMetrics().density);
+        final int heightDp = Math.round(getResources().getDisplayMetrics().heightPixels
+                / getResources().getDisplayMetrics().density);
+        final String xKey = ModulePreferences.overlayXKey(landscape);
+        final String yKey = ModulePreferences.overlayYKey(landscape);
+        int storedX = ModulePreferences.getOverlayXDp(this, landscape);
+        sliderRow(overlay, "水平位置 X", "dp", 0, widthDp,
+                storedX < 0 ? widthDp / 3 : storedX,
+                value -> ModulePreferences.setOverlayInt(MainActivity.this, xKey, value),
+                "從左邊算起，最大是螢幕寬度；沒設定過時置中。目前是"
+                        + (landscape ? "橫向" : "直向") + "，另一個方向分開儲存。");
+        sliderRow(overlay, "垂直位置 Y", "dp", 0, heightDp,
+                ModulePreferences.getOverlayYDp(this, landscape),
+                value -> ModulePreferences.setOverlayInt(MainActivity.this, yKey, value),
+                "從上緣算起，最大是螢幕高度。");
+        sliderRow(overlay, "字體大小", "sp", ModulePreferences.MIN_OVERLAY_TEXT_SIZE_SP,
+                ModulePreferences.MAX_OVERLAY_TEXT_SIZE_SP,
+                ModulePreferences.getOverlayTextSizeSp(this),
+                value -> ModulePreferences.setOverlayInt(MainActivity.this,
+                        ModulePreferences.KEY_OVERLAY_TEXT_SIZE_SP, value),
+                null);
 
         // ---- 音訊 ----
         LinearLayout audio = card(content, "音訊");
@@ -183,17 +177,41 @@ public final class MainActivity extends Activity {
         setContentView(scroll);
     }
 
-    private static String marginText(int dp) {
-        return "浮層距離螢幕頂端　" + dp + " dp";
+    private interface IntAction {
+        void run(int value);
     }
 
-    private static void setMarginControlsEnabled(TextView label, TextView note, SeekBar slider,
-                                                 boolean enabled) {
-        slider.setEnabled(enabled);
-        float alpha = enabled ? 1.0f : 0.4f;
-        label.setAlpha(alpha);
-        note.setAlpha(alpha);
-        slider.setAlpha(alpha);
+    /** A labelled slider; the value is saved when the finger lifts or a step button is pressed. */
+    private void sliderRow(LinearLayout card, final String name, final String unit, final int min,
+                           final int max, int initial, final IntAction save, String note) {
+        startItem(card);
+        final TextView label = text("", 16, PRIMARY);
+        add(card, label, 0, 12);
+        final SeekBar slider = new SeekBar(this);
+        // SeekBar has no minimum before API 26: progress 0 is min.
+        slider.setMax(Math.max(1, max - min));
+        final int start = Math.max(min, Math.min(max, initial));
+        slider.setProgress(start - min);
+        label.setText(name + "　" + start + " " + unit);
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                label.setText(name + "　" + (progress + min) + " " + unit);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+                save.run(bar.getProgress() + min);
+            }
+        });
+        add(card, slider, 0, 6);
+        if (note != null) {
+            add(card, text(note, 13, DESCRIPTION), 0, 2);
+        }
     }
 
     private Spinner rendererSpinner(final boolean automationProfileActive) {
