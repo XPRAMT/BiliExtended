@@ -104,11 +104,6 @@ final class InPlayerSettingsPanel {
             });
         }
 
-        TextView title = text("bilibili Ext", 20, PRIMARY);
-        title.setTypeface(null, Typeface.BOLD);
-        title.setShadowLayer(dp(4), 0, 0, Color.BLACK);
-        panel.addView(title);
-
         ScrollView scroll = new ScrollView(activity);
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout content = new LinearLayout(activity);
