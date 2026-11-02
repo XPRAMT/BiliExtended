@@ -207,6 +207,8 @@ final class InPlayerSettingsPanel {
         final TextView[] chips = new TextView[modes.length];
         LinearLayout row = new LinearLayout(activity);
         row.setOrientation(LinearLayout.HORIZONTAL);
+        // Baseline alignment would shift the two-line chip against the one-line ones.
+        row.setBaselineAligned(false);
         for (int index = 0; index < modes.length; index++) {
             final ModulePreferences.RendererMode mode = modes[index];
             TextView chip = text(mode.label, 14, PRIMARY);
@@ -319,6 +321,7 @@ final class InPlayerSettingsPanel {
 
         LinearLayout line = new LinearLayout(activity);
         line.setOrientation(LinearLayout.HORIZONTAL);
+        line.setBaselineAligned(false);
         line.setGravity(Gravity.CENTER_VERTICAL);
         line.addView(stepButton("−", () -> {
             slider.setProgress(Math.max(0, slider.getProgress() - 1));
