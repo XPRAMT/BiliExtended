@@ -117,6 +117,12 @@ public final class MainActivity extends Activity {
                 (button, checked) ->
                         ModulePreferences.setQtiOutputFenceEnabled(MainActivity.this, checked));
 
+        switchRow(smoothness, "HDR 影片自動用 Surface",
+                "播 HDR 影片時改用直連 Surface，才會觸發系統 HDR；其他影片維持你選的渲染器。",
+                ModulePreferences.isHdrAutoSurfaceEnabled(this),
+                (button, checked) -> ModulePreferences
+                        .setHdrAutoSurfaceEnabled(MainActivity.this, checked));
+
         if (ScreenPhysicalSize.hasHiddenResolution(getWindowManager().getDefaultDisplay())) {
             switchRow(smoothness, "原生解析度輸出",
                     "螢幕物理解析度高於 UI 時，影片以物理解析度輸出（UI 維持原尺寸）。",

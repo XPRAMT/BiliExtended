@@ -442,8 +442,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     String context = factoryContext(param.thisObject);
                     if (PlaybackActivityScope.isVideoDetailActivity(context)
                             || PlaybackActivityScope.isVideoPlaylistActivity(context)) {
-                        ModulePreferences.RendererMode mode =
-                                ModulePreferences.loadVideoDetailRendererModeForHook();
+                        ModulePreferences.RendererMode mode = HdrVideoRenderer.effectiveMode(
+                                ModulePreferences.loadVideoDetailRendererModeForHook());
                         if (ModulePreferences.loadMinimalMedia3PlayerForHook()) {
                             mode = ModulePreferences.RendererMode.SURFACE;
                         }

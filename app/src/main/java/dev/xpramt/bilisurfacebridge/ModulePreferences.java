@@ -28,6 +28,7 @@ final class ModulePreferences {
     static final String KEY_MINIMAL_MEDIA3_PLAYER = "minimal_media3_player";
     static final String KEY_REPLACE_STORY_VIDEO = "replace_story_video";
     static final String KEY_NATIVE_RESOLUTION_OUTPUT = "native_resolution_output";
+    static final String KEY_HDR_AUTO_SURFACE = "hdr_auto_surface";
     static final String KEY_OVERLAY_TOP_MARGIN_DP = "overlay_top_margin_dp";
     static final int DEFAULT_OVERLAY_TOP_MARGIN_DP = 12;
     static final int MIN_OVERLAY_TOP_MARGIN_DP = 0;
@@ -59,6 +60,24 @@ final class ModulePreferences {
     static final boolean DEFAULT_MINIMAL_MEDIA3_PLAYER = false;
     static final boolean DEFAULT_REPLACE_STORY_VIDEO = false;
     static final boolean DEFAULT_NATIVE_RESOLUTION_OUTPUT = false;
+    static final boolean DEFAULT_HDR_AUTO_SURFACE = true;
+
+    static boolean isHdrAutoSurfaceEnabled(Context context) {
+        return preferences(context).getBoolean(KEY_HDR_AUTO_SURFACE, DEFAULT_HDR_AUTO_SURFACE);
+    }
+
+    static void setHdrAutoSurfaceEnabled(Context context, boolean enabled) {
+        commitPreferences(context, preferences(context).edit()
+                .putBoolean(KEY_HDR_AUTO_SURFACE, enabled));
+    }
+
+    static boolean loadHdrAutoSurfaceForHook() {
+        try {
+            return hookPreferences().getBoolean(KEY_HDR_AUTO_SURFACE, DEFAULT_HDR_AUTO_SURFACE);
+        } catch (Throwable ignored) {
+            return DEFAULT_HDR_AUTO_SURFACE;
+        }
+    }
 
     static boolean isNativeResolutionOutputEnabled(Context context) {
         return preferences(context).getBoolean(

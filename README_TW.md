@@ -22,6 +22,7 @@
 |---|---|---|---|
 | 流暢度 | **影片渲染器**（`Texture`／`Surface external`／`Surface`） | 一般影片詳情頁播放器使用 Bilibili 的哪一個渲染器。`Texture` 與 `Surface external` 保留 Bilibili 的 external render／transform 路徑（縮放、旋轉、截圖）；直接 `Surface` 跳過它。**建議 `Surface external`**（理由見下文 2.2）。 | 立即，畫面會短暫重建 |
 | 流暢度 | **Media3 Vsync**（預設開啟） | 照 Media3 的方式排程並帶時間戳釋放影片幀，涵蓋 0.5x／1x／2x 倍速，見下文。 | 約 1–2 秒 |
+| 流暢度 | **HDR 影片自動用 Surface**（預設開啟） | 播放 HDR 影片（Bilibili 畫質「HDR 真彩」或「杜比視界」）時，渲染器自動切到直連 `Surface`，畫面連同 HDR 資訊直接送到顯示器，觸發系統的 HDR 模式。外部渲染器每一幀都用 GL 重畫進 8-bit sRGB，HDR 會被轉成色調映射後的 SDR 畫面。其他影片維持你選的渲染器。 | 立即 |
 | 流暢度 | **原生解析度輸出**（預設關閉；只在面板解析度高於 UI 的螢幕上顯示，例如跑 1080p UI 的 4K Sony Xperia XZ Premium） | 影片畫進與面板同大的緩衝區，直接以面板的解析度送到顯示硬體，其餘 UI 維持原尺寸。可用於 `Surface external` 與 `Surface`；`Texture` 的畫面會被合成進 UI 層，無法做到。 | 立即 |
 | 流暢度 | **高通解碼器輸出 fence**（預設開啟） | 設定高通影片解碼器時加入 QTI 軟體輸出 fence 的 vendor key，讓解碼完成的幀更早交出；只在解碼器宣告支援這些 key 時套用。 | 下一支影片 |
 | 資訊浮層 | **fps 浮層** | 畫面上顯示一行 `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext`：Media3 Vsync 狀態、平均 fps、1% low、渲染器。fps 是 IJK 實際送幀數，不是螢幕 VSync。 | 立即 |

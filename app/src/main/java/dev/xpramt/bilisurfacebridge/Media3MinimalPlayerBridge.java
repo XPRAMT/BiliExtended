@@ -2341,6 +2341,7 @@ final class Media3MinimalPlayerBridge {
             publishTrackLabels((List<?>) streamListObject, selectedVideo, selectedAudio,
                     displaySelection);
             PlaybackStreamOverlay.updateAssetSelection(selectedVideoLabel, selectedAudioLabel);
+            HdrVideoRenderer.noteVideoQuality(streamInt(selectedVideo, "getQualityId", -1));
             Log.i(TAG, "[DEBUG-stream-selection-5c30] asset-init asset="
                     + Integer.toHexString(System.identityHashCode(asset))
                     + " defaultVideoId=" + defaultVideoId
@@ -2493,6 +2494,9 @@ final class Media3MinimalPlayerBridge {
         String label;
         synchronized (TRACK_SELECTION_LOCK) {
             label = audio ? AUDIO_LABELS_BY_ID.get(qualityId) : VIDEO_LABELS_BY_ID.get(qualityId);
+        }
+        if (!audio && "returned".equals(outcome) && !param.hasThrowable()) {
+            HdrVideoRenderer.noteVideoQuality(qualityId);
         }
         Log.i(TAG, "[DEBUG-stream-selection-5c30] switch-" + outcome
                 + " kind=" + (audio ? "audio" : "video")

@@ -170,6 +170,10 @@ final class InPlayerSettingsPanel {
         switchRow(card, "高通解碼器輸出 fence", "降低解碼延遲；下一支影片生效。",
                 ModulePreferences.loadQtiOutputFenceForHook(),
                 ModulePreferences.KEY_QTI_OUTPUT_FENCE, null);
+        switchRow(card, "HDR 影片自動用 Surface", "播 HDR 影片時改用直連 Surface，才會觸發系統 HDR；其他影片維持你選的渲染器。",
+                ModulePreferences.loadHdrAutoSurfaceForHook(),
+                ModulePreferences.KEY_HDR_AUTO_SURFACE,
+                enabled -> HdrVideoRenderer.reevaluate());
         if (ScreenPhysicalSize.hasHiddenResolution(activity.getWindowManager().getDefaultDisplay())) {
             switchRow(card, "原生解析度輸出", "影片以螢幕物理解析度輸出，UI 維持原尺寸。",
                     ModulePreferences.loadNativeResolutionOutputForHook(),

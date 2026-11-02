@@ -538,6 +538,11 @@ final class PlayerSettingPanelHook {
         }
     }
 
+    /** Switches the live video layer of the newest player, whichever page asked. */
+    static void switchRendererTo(ModulePreferences.RendererMode mode) {
+        switchRendererOn(renderService == null ? null : renderService.get(), mode);
+    }
+
     /** Same as {@link #switchRenderer} when the render container service is known directly. */
     private static void switchRendererOn(Object service, ModulePreferences.RendererMode mode) {
         try {
