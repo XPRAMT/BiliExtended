@@ -170,6 +170,7 @@ final class PlayerSettingPanelHook {
                 throw new IllegalStateException("no Activity behind the panel context");
             }
             InPlayerSettingsPanel.show((Activity) context, contentBounds(),
+                    content == null ? null : content.get(),
                     new InPlayerSettingsPanel.Actions() {
                         @Override
                         public void applyRenderer(ModulePreferences.RendererMode mode) {

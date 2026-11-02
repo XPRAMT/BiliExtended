@@ -45,6 +45,7 @@ final class InPlayerSettingsPanel {
     private final Activity activity;
     private final Actions actions;
     private final float density;
+    private View originalContent;
 
     private InPlayerSettingsPanel(Activity activity, Actions actions) {
         this.activity = activity;
@@ -52,13 +53,18 @@ final class InPlayerSettingsPanel {
         this.density = activity.getResources().getDisplayMetrics().density;
     }
 
-    static void show(Activity activity, Rect bounds, Actions actions) {
+    static void show(Activity activity, Rect bounds, View originalContent, Actions actions) {
         View existing = open == null ? null : open.get();
         if (existing != null && existing.getParent() instanceof ViewGroup) {
             ((ViewGroup) existing.getParent()).removeView(existing);
         }
         InPlayerSettingsPanel panel = new InPlayerSettingsPanel(activity, actions);
+        panel.originalContent = originalContent;
         View root = panel.build(bounds);
+        if (originalContent != null) {
+            // Our cards do not fill the panel; the original rows must not show through.
+            originalContent.setVisibility(View.INVISIBLE);
+        }
         open = new WeakReference<View>(root);
         activity.addContentView(root, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -73,7 +79,7 @@ final class InPlayerSettingsPanel {
 
         // Transparent: the video stays as it is, a tap on it just closes the panel.
         View scrim = new View(activity);
-        scrim.setOnClickListener(v -> dismiss(root));
+        scrim.setOnClickListener(v -> close(root));
         root.addView(scrim, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -84,7 +90,7 @@ final class InPlayerSettingsPanel {
         // No background of its own: only the cards are drawn, like the original panel. Still
         // clickable so a tap between the cards does not count as a tap outside.
         panel.setClickable(true);
-        panel.setPadding(dp(16), dp(12), dp(16), dp(12));
+        panel.setPadding(dp(16), 0, dp(16), 0);
         final FrameLayout.LayoutParams panelParameters = new FrameLayout.LayoutParams(
                 width, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
         root.addView(panel, panelParameters);
@@ -108,10 +114,11 @@ final class InPlayerSettingsPanel {
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout content = new LinearLayout(activity);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(0, dp(4), 0, dp(12));
+        content.setPadding(0, 0, 0, 0);
         scroll.addView(content);
         panel.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        scroll.post(() -> scroll.scrollTo(0, 0));
 
         smoothness(card(content, "流暢度"));
         overlay(card(content, "資訊浮層"));
@@ -304,7 +311,7 @@ final class InPlayerSettingsPanel {
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackground(rounded(CARD, 16));
         card.setPadding(dp(16), dp(12), dp(16), dp(14));
-        LinearLayout.LayoutParams parameters = matchWrap(14);
+        LinearLayout.LayoutParams parameters = matchWrap(0);
         parent.addView(card, parameters);
         TextView title = text(heading, 15, ACCENT);
         title.setTypeface(null, Typeface.BOLD);
@@ -349,9 +356,12 @@ final class InPlayerSettingsPanel {
         return Math.round(value * density);
     }
 
-    private static void dismiss(View root) {
+    private void close(View root) {
         if (root.getParent() instanceof ViewGroup) {
             ((ViewGroup) root.getParent()).removeView(root);
+        }
+        if (originalContent != null) {
+            originalContent.setVisibility(View.VISIBLE);
         }
     }
 
