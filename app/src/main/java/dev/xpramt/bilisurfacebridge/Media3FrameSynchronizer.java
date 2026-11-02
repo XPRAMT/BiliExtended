@@ -919,6 +919,14 @@ final class Media3FrameSynchronizer {
         NativeRefreshCap.setVsyncGrid(nativeGridAnchorNs, periodNs, vsyncNs, deadlineNs);
     }
 
+    /** Media3 Vsync was switched off while playing: stop the native release scheduling. */
+    static synchronized void disableNativeScheduling() {
+        NativeRefreshCap.setReleaseScheduling(false, 0, NativeRefreshCap.GRID_MEDIA3);
+        nativeSchedulingActive = false;
+        nativeSchedulingRequested = false;
+        NativeRefreshCap.invalidateFrameTimer();
+    }
+
     private static synchronized void ensureNativeScheduling() {
         if (!NATIVE_RELEASE_SCHEDULING || nativeSchedulingActive) {
             return;

@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.util.Log;
 
 import java.io.File;
+import java.util.Map;
+import java.util.Set;
 
 import de.robv.android.xposed.XSharedPreferences;
 
@@ -228,8 +230,8 @@ final class ModulePreferences {
             boolean enabled = preferences.getBoolean(
                     KEY_MINIMAL_MEDIA3_PLAYER, DEFAULT_MINIMAL_MEDIA3_PLAYER);
             String source;
-            if (preferences instanceof XSharedPreferences) {
-                File preferenceFile = ((XSharedPreferences) preferences).getFile();
+            if (HOOK_VIEW.delegate() instanceof XSharedPreferences) {
+                File preferenceFile = ((XSharedPreferences) HOOK_VIEW.delegate()).getFile();
                 source = " file=" + preferenceFile.getAbsolutePath()
                         + " readable=" + preferenceFile.canRead()
                         + " length=" + preferenceFile.length()
@@ -412,7 +414,102 @@ final class ModulePreferences {
             refresh.setDaemon(true);
             refresh.start();
         }
-        return snapshot != null ? snapshot : cachedHookPreferences;
+        return HOOK_VIEW.delegateTo(snapshot != null ? snapshot : cachedHookPreferences);
+    }
+
+    // Values the in-player menu just changed: the module app writes the real preferences, which
+    // reach this process one or two seconds later, so the new value wins here until then.
+    private static final long HOST_OVERRIDE_TTL_NS = 15_000_000_000L;
+    private static final java.util.Map<String, Object[]> HOST_OVERRIDES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final OverridePreferences HOOK_VIEW = new OverridePreferences();
+
+    static void setHostOverride(String key, Object value) {
+        HOST_OVERRIDES.put(key, new Object[]{value, System.nanoTime() + HOST_OVERRIDE_TTL_NS});
+    }
+
+    private static Object hostOverride(String key) {
+        Object[] entry = HOST_OVERRIDES.get(key);
+        if (entry == null) {
+            return null;
+        }
+        if (System.nanoTime() > (Long) entry[1]) {
+            HOST_OVERRIDES.remove(key);
+            return null;
+        }
+        return entry[0];
+    }
+
+    /** What the hooks read: the override first, everything else from the real preferences. */
+    private static final class OverridePreferences implements SharedPreferences {
+        private volatile SharedPreferences delegate;
+
+        OverridePreferences delegateTo(SharedPreferences base) {
+            delegate = base;
+            return this;
+        }
+
+        SharedPreferences delegate() {
+            return delegate;
+        }
+
+        @Override
+        public boolean getBoolean(String key, boolean defValue) {
+            Object value = hostOverride(key);
+            return value instanceof Boolean ? (Boolean) value : delegate.getBoolean(key, defValue);
+        }
+
+        @Override
+        public String getString(String key, String defValue) {
+            Object value = hostOverride(key);
+            return value instanceof String ? (String) value : delegate.getString(key, defValue);
+        }
+
+        @Override
+        public int getInt(String key, int defValue) {
+            Object value = hostOverride(key);
+            return value instanceof Integer ? (Integer) value : delegate.getInt(key, defValue);
+        }
+
+        @Override
+        public boolean contains(String key) {
+            return hostOverride(key) != null || delegate.contains(key);
+        }
+
+        @Override
+        public Map<String, ?> getAll() {
+            return delegate.getAll();
+        }
+
+        @Override
+        public Set<String> getStringSet(String key, Set<String> defValues) {
+            return delegate.getStringSet(key, defValues);
+        }
+
+        @Override
+        public long getLong(String key, long defValue) {
+            return delegate.getLong(key, defValue);
+        }
+
+        @Override
+        public float getFloat(String key, float defValue) {
+            return delegate.getFloat(key, defValue);
+        }
+
+        @Override
+        public Editor edit() {
+            throw new UnsupportedOperationException("read-only module preferences");
+        }
+
+        @Override
+        public void registerOnSharedPreferenceChangeListener(
+                OnSharedPreferenceChangeListener listener) {
+        }
+
+        @Override
+        public void unregisterOnSharedPreferenceChangeListener(
+                OnSharedPreferenceChangeListener listener) {
+        }
     }
 
     private static SharedPreferences readProviderSnapshot() {

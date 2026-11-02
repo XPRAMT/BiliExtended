@@ -46,6 +46,27 @@ final class PlaybackDebugOverlay {
 
     private int appliedTopMarginDp = -1;
 
+    /** Shown only while the setting is on; the margin follows the setting. */
+    private void applyState() {
+        label.setVisibility(ModulePreferences.loadPlaybackDebugOverlayForHook()
+                ? View.VISIBLE : View.GONE);
+        applyTopMargin();
+    }
+
+    /** Applies a changed setting right away instead of at the next one-second tick. */
+    static void refreshAll() {
+        synchronized (OVERLAYS) {
+            for (final PlaybackDebugOverlay overlay : OVERLAYS.values()) {
+                overlay.mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        overlay.applyState();
+                    }
+                });
+            }
+        }
+    }
+
     private void applyTopMargin() {
         int marginDp = ModulePreferences.loadOverlayTopMarginDpForHook();
         if (marginDp == appliedTopMarginDp) {
@@ -80,7 +101,7 @@ final class PlaybackDebugOverlay {
                 text.append(" | ").append(stream);
             }
             label.setText(text);
-            applyTopMargin();
+            applyState();
             mainHandler.postDelayed(this, 1000L);
         }
     };
@@ -129,6 +150,7 @@ final class PlaybackDebugOverlay {
         }
         previousFrameCount = DISPLAYED_FRAMES.get();
         previousSampleTime = SystemClock.elapsedRealtime();
+        applyState();
         mainHandler.postDelayed(update, 1000L);
     }
 

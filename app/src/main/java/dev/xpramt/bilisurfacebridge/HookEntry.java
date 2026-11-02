@@ -113,11 +113,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
             // The IjkMediaPlayer Java API is driven from the main process (it forwards to the
             // service over AIDL), so player option hooks belong here, not in the service.
             installPictureQueueSizeHook(loadPackageParam.classLoader);
-            if (ModulePreferences.loadMedia3FrameSyncForHook()) {
-                logOnce("external-render-immediate", ExternalRenderImmediate.install());
-                logOnce("textureview-vsync-invalidator", TextureViewVsyncInvalidator.install());
-                logOnce("external-render-timestamps", ExternalRenderTimestamps.install());
-            }
+            // Installed whatever the setting says; each hook checks Media3 Vsync when it runs, so
+            // the in-player menu can switch it on without restarting Bilibili.
+            logOnce("external-render-immediate", ExternalRenderImmediate.install());
+            logOnce("textureview-vsync-invalidator", TextureViewVsyncInvalidator.install());
+            logOnce("external-render-timestamps", ExternalRenderTimestamps.install());
         }
         // Installed regardless of the setting, which the hooks read when they fire: under NPatch
         // manager mode the module preferences are unreadable until Bilibili's Application
@@ -141,9 +141,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!ModulePreferences.loadPlaybackDebugOverlayForHook()) {
-                                return;
-                            }
+                            // Always counting, so the overlay can be switched on mid-playback.
                             Object delegate = param.args[0];
                             if (delegate != null && Proxy.isProxyClass(delegate.getClass())
                                     && Proxy.getInvocationHandler(delegate)
@@ -157,9 +155,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(ijkPlayerClass, "start", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    if (!ModulePreferences.loadPlaybackDebugOverlayForHook()) {
-                        return;
-                    }
                     try {
                         PlaybackDebugOverlay.resetFrameTiming();
                         Object existingCallback = XposedHelpers.getObjectField(
@@ -216,6 +211,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             logOnce("mediacodec-frame-sync-hooks", Media3FrameSynchronizer.install());
             logOnce("media3-playback-clock-hooks",
                     Media3FrameSynchronizer.installPlaybackClockHooks(classLoader));
+            Media3SyncWatcher.start();
             log("hooked IjkMediaPlayerService device=" + Build.MODEL);
         } catch (Throwable throwable) {
             log("IJK refresh-cap hook unavailable: " + throwable.getClass().getSimpleName());
@@ -340,7 +336,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
     }
 
-    private void applyExperiments(Object service) {
+    static void applyExperiments(Object service) {
         boolean debugOverlay = ModulePreferences.loadPlaybackDebugOverlayForHook();
         boolean blockDrop = ModulePreferences.loadBlockIjkFrameDropForHook();
         boolean blockComputeTargetDelay =
@@ -372,7 +368,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
     }
 
-    private String rawSamplePath() {
+    private static String rawSamplePath() {
         int userId = android.os.Process.myUid() / 100000;
         File directory = new File("/data/user/" + userId + "/"
                 + TARGET_PACKAGE + "/files/bilisurfacebridge");
@@ -832,11 +828,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private void attachDebugOverlayForPlayback(Object factory, Object layer) {
-        boolean debugOverlayEnabled = ModulePreferences.loadPlaybackDebugOverlayForHook();
+        // The fps overlay is always attached and hides itself when switched off, so the
+        // in-player menu can turn it on mid-playback.
+        boolean debugOverlayEnabled = true;
         boolean streamOverlayEnabled = ModulePreferences.loadPlaybackStreamOverlayForHook();
-        if (!debugOverlayEnabled && !streamOverlayEnabled) {
-            return;
-        }
         if (!isVideoPlaybackActivity(factoryContext(factory)) || !(layer instanceof View)) {
             return;
         }
