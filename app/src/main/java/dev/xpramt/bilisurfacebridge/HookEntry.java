@@ -556,6 +556,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
         if (renderService != null) {
             hookRenderContainerClass(renderService.getClass(), classLoader);
+            PlayerSettingPanelHook.noteRenderService(renderService);
             recordFactoryContext(renderService, playerContainer);
         }
         if (controlService != null) {
@@ -976,6 +977,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private void attachStreamOverlayToActivity(Activity activity) {
+        PlayerSettingPanelHook.noteActivity(activity);
         String activityName = activity.getClass().getName();
         if (!PlaybackActivityScope.isVideoPlaybackActivity(activityName)) {
             return;

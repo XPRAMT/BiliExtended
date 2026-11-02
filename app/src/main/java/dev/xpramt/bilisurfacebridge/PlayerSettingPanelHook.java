@@ -97,10 +97,212 @@ final class PlayerSettingPanelHook {
                     break;
                 }
             }
-            return "in-player settings panel hooked (" + build.getName() + ")";
+            return "in-player settings panel hooked (" + build.getName() + "); "
+                    + SettingsDialogEntry.install(classLoader);
         } catch (Throwable throwable) {
             return "in-player settings panel hook unavailable="
                     + throwable.getClass().getSimpleName();
+        }
+    }
+
+    /** The newest render container service seen: the dialog entry has no widget to ask. */
+    private static WeakReference<Object> renderService;
+
+    static void noteRenderService(Object service) {
+        renderService = new WeakReference<>(service);
+    }
+
+    private static WeakReference<Activity> topActivity;
+    private static WeakReference<android.app.Dialog> lastDialog;
+
+    /** Called for every Activity that resumes; the bottom-sheet entry needs one to show on. */
+    static void noteActivity(Activity activity) {
+        topActivity = new WeakReference<>(activity);
+    }
+
+    /**
+     * The same entry in the bottom-sheet settings menu (windowed player, phones in portrait):
+     * a row right after "More playback settings". The sheet's RecyclerView takes its rows from
+     * the shared component adapter's updateData(List of UIComponent); we add a
+     * VideoSettingDescriptionComponent whose data is built like the "More playback settings" row.
+     */
+    private static final class SettingsDialogEntry {
+        private static final String ADAPTER = "com.bilibili.app.gemini.ui.f";
+        private static final String DESCRIPTION =
+                "com.bilibili.playerbizcommonv2.widget.setting.channel.VideoSettingDescriptionComponent";
+        private static final String SWITCH =
+                "com.bilibili.playerbizcommonv2.widget.setting.channel.VideoSettingSwitchComponent";
+        // Mask bits of the data class's synthetic constructor: use the default for iconUrl (2),
+        // visible (8), description (16), title end icon (128), its click (512), badge (1024),
+        // the four colours and the exposure entry.
+        private static final int DEFAULTS = 2 | 8 | 16 | 128 | 512 | 1024
+                | 2048 | 4096 | 8192 | 16384 | 65536;
+        private static Object ourComponent;
+
+        static String install(ClassLoader loader) {
+            try {
+                final Class<?> adapter = XposedHelpers.findClassIfExists(ADAPTER, loader);
+                final Class<?> description = XposedHelpers.findClassIfExists(DESCRIPTION, loader);
+                final Class<?> switchRow = XposedHelpers.findClassIfExists(SWITCH, loader);
+                if (adapter == null || description == null || switchRow == null) {
+                    return "settings dialog entry: classes not found";
+                }
+                XposedBridge.hookAllMethods(android.app.Dialog.class, "show", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        lastDialog = new WeakReference<>((android.app.Dialog) param.thisObject);
+                    }
+                });
+                int hooked = XposedBridge.hookAllMethods(adapter, "updateData",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                try {
+                                    insert(param, description, switchRow);
+                                } catch (Throwable throwable) {
+                                    logOnce("dialog-insert", throwable);
+                                }
+                            }
+                        }).size();
+                return "settings dialog entry hooked updateData=" + hooked;
+            } catch (Throwable throwable) {
+                return "settings dialog entry unavailable=" + throwable.getClass().getSimpleName();
+            }
+        }
+
+        private static void insert(XC_MethodHook.MethodHookParam param, Class<?> description,
+                                   Class<?> switchRow) throws Throwable {
+            if (param.args.length != 1 || !(param.args[0] instanceof List)) {
+                return;
+            }
+            List<?> original = (List<?>) param.args[0];
+            int lastSwitch = -1;
+            for (int index = 0; index < original.size(); index++) {
+                if (switchRow.isInstance(original.get(index))) {
+                    lastSwitch = index;
+                }
+            }
+            if (lastSwitch < 0) {
+                return;
+            }
+            int anchor = -1;
+            for (int index = lastSwitch + 1; index < original.size(); index++) {
+                if (description.isInstance(original.get(index))) {
+                    anchor = index;
+                    break;
+                }
+            }
+            if (anchor < 0) {
+                return;
+            }
+            if (ourComponent == null) {
+                ourComponent = description.getConstructors()[0].newInstance(
+                        copyData(original.get(anchor)));
+            }
+            List<Object> merged = new ArrayList<>(original);
+            merged.add(anchor + 1, ourComponent);
+            param.args[0] = merged;
+        }
+
+        /** A data object for our row, taking the arrow icon and style from the anchor row. */
+        private static Object copyData(Object anchorComponent) throws Exception {
+            Object anchorData = null;
+            for (Field field : anchorComponent.getClass().getDeclaredFields()) {
+                if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                    field.setAccessible(true);
+                    anchorData = field.get(anchorComponent);
+                    break;
+                }
+            }
+            if (anchorData == null) {
+                throw new IllegalStateException("anchor data missing");
+            }
+            List<Field> fields = new ArrayList<>();
+            for (Field field : anchorData.getClass().getDeclaredFields()) {
+                if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                    field.setAccessible(true);
+                    fields.add(field);
+                }
+            }
+            // Declaration order = constructor order: ... endIconUrl, endIconRes, ..., style, expose.
+            Object endIconRes = fields.get(6).get(anchorData);
+            Object style = fields.get(15).get(anchorData);
+            java.lang.reflect.Constructor<?> constructor = null;
+            for (java.lang.reflect.Constructor<?> candidate
+                    : anchorData.getClass().getConstructors()) {
+                if (candidate.getParameterTypes().length == 17) {
+                    constructor = candidate;
+                }
+            }
+            if (constructor == null) {
+                throw new IllegalStateException("data constructor missing");
+            }
+            Object onClick = function0(new Runnable() {
+                @Override
+                public void run() {
+                    openFromDialog();
+                }
+            });
+            Object[] args = new Object[17];
+            args[0] = ROW_TITLE;
+            args[1] = "";
+            args[2] = ROW_ICON;
+            args[5] = endIconRes;
+            args[7] = onClick;
+            args[10] = 0;
+            args[11] = 0;
+            args[12] = 0;
+            args[13] = 0;
+            args[14] = style;
+            args[16] = DEFAULTS;
+            return constructor.newInstance(args);
+        }
+
+        private static void openFromDialog() {
+            try {
+                Activity activity = topActivity == null ? null : topActivity.get();
+                if (activity == null) {
+                    throw new IllegalStateException("no activity");
+                }
+                android.app.Dialog dialog = lastDialog == null ? null : lastDialog.get();
+                if (dialog != null && dialog.isShowing()) {
+                    dialog.dismiss();
+                }
+                InPlayerSettingsPanel.show(activity, null, null,
+                        new InPlayerSettingsPanel.Actions() {
+                            @Override
+                            public void applyRenderer(ModulePreferences.RendererMode mode) {
+                                switchRendererOn(renderService == null ? null
+                                        : renderService.get(), mode);
+                            }
+                        });
+            } catch (Throwable throwable) {
+                logOnce("dialog-open", throwable);
+            }
+        }
+    }
+
+    /** Same as {@link #switchRenderer} when the render container service is known directly. */
+    private static void switchRendererOn(Object service, ModulePreferences.RendererMode mode) {
+        try {
+            if (service == null) {
+                throw new IllegalStateException("render service not seen yet");
+            }
+            for (Method method : service.getClass().getMethods()) {
+                if (method.getName().equals("setExactlyVideoLayerType")
+                        && method.getParameterTypes().length == 1) {
+                    Object target = XposedHelpers.getStaticObjectField(
+                            method.getParameterTypes()[0], mode.bilibiliTypeField);
+                    Object current = XposedHelpers.callMethod(service, "getCurrentLayerType");
+                    if (!target.equals(current)) {
+                        method.invoke(service, target);
+                    }
+                    return;
+                }
+            }
+            throw new IllegalStateException("setExactlyVideoLayerType not found");
+        } catch (Throwable throwable) {
+            logOnce("renderer-dialog", throwable);
         }
     }
 
