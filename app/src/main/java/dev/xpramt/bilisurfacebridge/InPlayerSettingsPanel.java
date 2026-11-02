@@ -101,7 +101,12 @@ final class InPlayerSettingsPanel {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         DisplayMetrics metrics = activity.getResources().getDisplayMetrics();
-        int width = Math.min(dp(300), Math.round(metrics.widthPixels * 0.40f));
+        // Wide screens (tablet, phone in landscape): a side panel of 300 dp at most 40% of the
+        // width. A phone in portrait would leave only ~140 dp, so there it takes nearly the
+        // whole width.
+        int width = metrics.widthPixels < dp(600)
+                ? Math.min(metrics.widthPixels - dp(24), dp(420))
+                : Math.min(dp(300), Math.round(metrics.widthPixels * 0.40f));
         LinearLayout panel = new LinearLayout(activity);
         panel.setOrientation(LinearLayout.VERTICAL);
         // No background of its own: only the cards are drawn, like the original panel. Still
