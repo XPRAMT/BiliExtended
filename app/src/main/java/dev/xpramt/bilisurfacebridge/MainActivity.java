@@ -121,15 +121,17 @@ public final class MainActivity extends Activity {
         LinearLayout overlay = card(content, "資訊浮層");
 
         final TextView marginLabel = text("", 16, PRIMARY);
-        final TextView marginNote = text("0～200 dp，放開即套用；只作用於 fps 浮層。", 13, DESCRIPTION);
+        final TextView marginNote = text("1～100 dp，放開即套用；只作用於 fps 浮層。", 13, DESCRIPTION);
         final SeekBar marginSlider = new SeekBar(this);
-        marginSlider.setMax(ModulePreferences.MAX_OVERLAY_TOP_MARGIN_DP);
-        marginSlider.setProgress(ModulePreferences.getOverlayTopMarginDp(this));
-        marginLabel.setText(marginText(marginSlider.getProgress()));
+        // SeekBar has no minimum before API 26: progress 0 is MIN dp.
+        final int minMargin = ModulePreferences.MIN_OVERLAY_TOP_MARGIN_DP;
+        marginSlider.setMax(ModulePreferences.MAX_OVERLAY_TOP_MARGIN_DP - minMargin);
+        marginSlider.setProgress(ModulePreferences.getOverlayTopMarginDp(this) - minMargin);
+        marginLabel.setText(marginText(marginSlider.getProgress() + minMargin));
         marginSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                marginLabel.setText(marginText(progress));
+                marginLabel.setText(marginText(progress + minMargin));
             }
 
             @Override
@@ -138,7 +140,8 @@ public final class MainActivity extends Activity {
 
             @Override
             public void onStopTrackingTouch(SeekBar bar) {
-                ModulePreferences.setOverlayTopMarginDp(MainActivity.this, bar.getProgress());
+                ModulePreferences.setOverlayTopMarginDp(
+                        MainActivity.this, bar.getProgress() + minMargin);
             }
         });
 

@@ -27,7 +27,8 @@ final class ModulePreferences {
     static final String KEY_REPLACE_STORY_VIDEO = "replace_story_video";
     static final String KEY_OVERLAY_TOP_MARGIN_DP = "overlay_top_margin_dp";
     static final int DEFAULT_OVERLAY_TOP_MARGIN_DP = 12;
-    static final int MAX_OVERLAY_TOP_MARGIN_DP = 200;
+    static final int MIN_OVERLAY_TOP_MARGIN_DP = 1;
+    static final int MAX_OVERLAY_TOP_MARGIN_DP = 100;
     static final boolean DEFAULT_PLAYBACK_DEBUG_OVERLAY = false;
     static final boolean DEFAULT_PLAYBACK_STREAM_OVERLAY = false;
     static final boolean DEFAULT_AUTO_SELECT_BEST_AUDIO = false;
@@ -127,7 +128,7 @@ final class ModulePreferences {
     }
 
     private static int clampOverlayTopMargin(int dp) {
-        return Math.max(0, Math.min(MAX_OVERLAY_TOP_MARGIN_DP, dp));
+        return Math.max(MIN_OVERLAY_TOP_MARGIN_DP, Math.min(MAX_OVERLAY_TOP_MARGIN_DP, dp));
     }
 
     static boolean isReplaceStoryVideoEnabled(Context context) {
