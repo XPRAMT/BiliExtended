@@ -13,6 +13,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.FrameLayout;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -120,7 +121,36 @@ final class PlaybackDebugOverlay {
         }
     }
 
+    private final WeakReference<Activity> activityRef;
     private float lastFps;
+
+    /**
+     * Puts the label back if it was taken out of the window. The overlay is added once, when the
+     * player's renderer is created; Bilibili's own screen can rebuild its content (a rotation
+     * switches between the page's layouts, and setContentView() removes every view added to the
+     * content area since), and nothing else would add it again.
+     */
+    private void reattachIfRemoved() {
+        if (label.getParent() != null) {
+            return;
+        }
+        Activity activity = activityRef.get();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+            return;
+        }
+        try {
+            ViewGroup.LayoutParams layout = label.getLayoutParams();
+            activity.addContentView(label, layout != null ? layout : new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+            appliedX = Integer.MIN_VALUE;  // lay it out again at the stored position
+            android.util.Log.i("BiliSurfaceBridge", "info overlay was removed from "
+                    + activity.getClass().getSimpleName() + "; attached it again");
+        } catch (Throwable throwable) {
+            android.util.Log.w("BiliSurfaceBridge", "info overlay could not be attached again: "
+                    + throwable.getClass().getSimpleName());
+        }
+    }
 
     /**
      * The info line. Two independent parts joined with " | ": the fps part (Media3 Vsync state,
@@ -155,12 +185,14 @@ final class PlaybackDebugOverlay {
             lastFps = (frames - previousFrameCount) * 1000.0f / elapsed;
             previousFrameCount = frames;
             previousSampleTime = now;
+            reattachIfRemoved();
             renderText();
             mainHandler.postDelayed(this, 1000L);
         }
     };
 
     private PlaybackDebugOverlay(Activity activity) {
+        activityRef = new WeakReference<Activity>(activity);
         label = new OutlinedTextView(activity);
         label.setTextColor(Color.WHITE);
         label.setTextSize(ModulePreferences.loadOverlayTextSizeSpForHook());
@@ -279,6 +311,7 @@ final class PlaybackDebugOverlay {
             OVERLAYS.put(activity, overlay);
         }
         overlay.renderer = rendererName(rendererClass);
+        overlay.reattachIfRemoved();
     }
 
     static Object frameCallback(Class<?> callbackClass, Object delegate) {
