@@ -130,6 +130,26 @@ final class PlayerSettingPanelHook {
     private static final class SettingsPageEntry {
         private static final String ANCHOR_KEY = "PlaySetting";
         private static final String OUR_KEY = "bsb_ext";
+        /** The Settings page fragment: its list's bounds are the area the panel fills. */
+        private static WeakReference<Object> page;
+
+        private static Rect listBounds() {
+            try {
+                Object fragment = page == null ? null : page.get();
+                View list = fragment == null ? null
+                        : (View) XposedHelpers.callMethod(fragment, "getListView");
+                if (list == null || !list.isAttachedToWindow() || list.getWidth() <= 0) {
+                    return null;
+                }
+                int[] location = new int[2];
+                list.getLocationOnScreen(location);
+                return new Rect(location[0], location[1], location[0] + list.getWidth(),
+                        location[1] + list.getHeight());
+            } catch (Throwable throwable) {
+                logOnce("settings-page-bounds", throwable);
+                return null;
+            }
+        }
 
         static String install(ClassLoader loader) {
             try {
@@ -143,6 +163,7 @@ final class PlayerSettingPanelHook {
                             @Override
                             protected void afterHookedMethod(MethodHookParam param) {
                                 try {
+                                    page = new WeakReference<>(param.thisObject);
                                     insert(param.args.length > 0 ? param.args[0] : null);
                                 } catch (Throwable throwable) {
                                     logOnce("settings-page", throwable);
@@ -238,7 +259,7 @@ final class PlayerSettingPanelHook {
                 if (activity == null) {
                     throw new IllegalStateException("no activity");
                 }
-                InPlayerSettingsPanel.show(activity, null, null,
+                InPlayerSettingsPanel.show(activity, listBounds(), true, null,
                         new InPlayerSettingsPanel.Actions() {
                             @Override
                             public void applyRenderer(ModulePreferences.RendererMode mode) {
