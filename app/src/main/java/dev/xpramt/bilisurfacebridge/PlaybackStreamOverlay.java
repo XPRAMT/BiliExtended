@@ -45,6 +45,15 @@ final class PlaybackStreamOverlay {
     private PlaybackStreamOverlay() {
     }
 
+    /** The "video | audio" text for the debug overlay, or "" while nothing is confirmed yet. */
+    static String labelForDebugOverlay() {
+        String selection = latestSelection;
+        if (confirmedDecoderVideoLabel == null || selection == null) {
+            return "";
+        }
+        return selection.replace(" / ", " | ");
+    }
+
     static void show(final Activity activity) {
         if (activity == null) {
             return;
@@ -230,9 +239,11 @@ final class PlaybackStreamOverlay {
 
     private static void applyPlaybackControlVisibility(Activity activity,
             OutlinedTextView label) {
-        boolean visible = PlaybackOverlayVisibilityState.shouldShow(
-                CONTROL_VISIBILITY.get(activity),
-                Boolean.TRUE.equals(POSITION_READY.get(activity)));
+        // The debug overlay carries this text in its own line; do not show it twice.
+        boolean visible = !ModulePreferences.loadPlaybackDebugOverlayForHook()
+                && PlaybackOverlayVisibilityState.shouldShow(
+                        CONTROL_VISIBILITY.get(activity),
+                        Boolean.TRUE.equals(POSITION_READY.get(activity)));
         label.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 

@@ -11,6 +11,7 @@ import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -151,7 +152,30 @@ public final class MainActivity extends Activity {
         debugOverlay.setOnCheckedChangeListener((button, checked) ->
                 ModulePreferences.setPlaybackDebugOverlayEnabled(MainActivity.this, checked));
         add(content, debugOverlay, 0, 8);
-        addSettingNote(content, "顯示 renderer 與 IJK video-display callback 的實際送幀 fps；不是螢幕 VSync。", Color.LTGRAY);
+        addSettingNote(content, "單行顯示：幀同步開關 | 平均 fps | 1% low | 渲染器；有開影音流浮層時，影音格式接在後面。fps 是 IJK video-display callback 的實際送幀數，不是螢幕 VSync。", Color.LTGRAY);
+
+        final TextView marginLabel = text("", 16, PRIMARY);
+        final SeekBar marginSlider = new SeekBar(this);
+        marginSlider.setMax(ModulePreferences.MAX_OVERLAY_TOP_MARGIN_DP);
+        marginSlider.setProgress(ModulePreferences.getOverlayTopMarginDp(this));
+        marginLabel.setText("浮層距離螢幕頂端：" + marginSlider.getProgress() + " dp");
+        marginSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                marginLabel.setText("浮層距離螢幕頂端：" + progress + " dp");
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+                ModulePreferences.setOverlayTopMarginDp(MainActivity.this, bar.getProgress());
+            }
+        });
+        add(content, marginLabel, 0, 12);
+        add(content, marginSlider, 0, 4);
 
         Switch streamOverlay = new Switch(this);
         streamOverlay.setText("播放影音流浮層");

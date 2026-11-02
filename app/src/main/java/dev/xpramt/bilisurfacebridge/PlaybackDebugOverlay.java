@@ -44,6 +44,22 @@ final class PlaybackDebugOverlay {
     private long previousFrameCount;
     private long previousSampleTime;
 
+    private int appliedTopMarginDp = -1;
+
+    private void applyTopMargin() {
+        int marginDp = ModulePreferences.loadOverlayTopMarginDpForHook();
+        if (marginDp == appliedTopMarginDp) {
+            return;
+        }
+        appliedTopMarginDp = marginDp;
+        ViewGroup.LayoutParams parameters = label.getLayoutParams();
+        if (parameters instanceof FrameLayout.LayoutParams) {
+            ((FrameLayout.LayoutParams) parameters).topMargin =
+                    Math.round(marginDp * label.getResources().getDisplayMetrics().density);
+            label.setLayoutParams(parameters);
+        }
+    }
+
     private final Runnable update = new Runnable() {
         @Override
         public void run() {
@@ -56,8 +72,15 @@ final class PlaybackDebugOverlay {
             String onePercentLow = callbackOnePercentLowText();
             String media3State = ModulePreferences.loadMedia3FrameSyncForHook()
                     ? "On" : "Off";
-            label.setText(media3State + " | Avg " + Math.round(fps) + "fps | 1%Low "
-                    + onePercentLow + " | " + renderer);
+            StringBuilder text = new StringBuilder(media3State)
+                    .append(" | Avg ").append(Math.round(fps)).append("fps | 1%Low ")
+                    .append(onePercentLow).append(" | ").append(renderer);
+            String stream = PlaybackStreamOverlay.labelForDebugOverlay();
+            if (!stream.isEmpty()) {
+                text.append(" | ").append(stream);
+            }
+            label.setText(text);
+            applyTopMargin();
             mainHandler.postDelayed(this, 1000L);
         }
     };
@@ -75,7 +98,7 @@ final class PlaybackDebugOverlay {
         FrameLayout.LayoutParams parameters = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        parameters.topMargin = dp(activity, 12);
+        parameters.topMargin = dp(activity, ModulePreferences.loadOverlayTopMarginDpForHook());
         activity.addContentView(label, parameters);
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             try {

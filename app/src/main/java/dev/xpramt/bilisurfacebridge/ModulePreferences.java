@@ -25,6 +25,9 @@ final class ModulePreferences {
     static final String KEY_FRAME_QUEUE_WAIT_ROUND_UP = "frame_queue_wait_round_up";
     static final String KEY_MINIMAL_MEDIA3_PLAYER = "minimal_media3_player";
     static final String KEY_REPLACE_STORY_VIDEO = "replace_story_video";
+    static final String KEY_OVERLAY_TOP_MARGIN_DP = "overlay_top_margin_dp";
+    static final int DEFAULT_OVERLAY_TOP_MARGIN_DP = 12;
+    static final int MAX_OVERLAY_TOP_MARGIN_DP = 200;
     static final boolean DEFAULT_PLAYBACK_DEBUG_OVERLAY = false;
     static final boolean DEFAULT_PLAYBACK_STREAM_OVERLAY = false;
     static final boolean DEFAULT_AUTO_SELECT_BEST_AUDIO = false;
@@ -102,6 +105,29 @@ final class ModulePreferences {
     static boolean isAutoSelectBestAudioEnabled(Context context) {
         return preferences(context).getBoolean(
                 KEY_AUTO_SELECT_BEST_AUDIO, DEFAULT_AUTO_SELECT_BEST_AUDIO);
+    }
+
+    static int getOverlayTopMarginDp(Context context) {
+        return clampOverlayTopMargin(preferences(context).getInt(
+                KEY_OVERLAY_TOP_MARGIN_DP, DEFAULT_OVERLAY_TOP_MARGIN_DP));
+    }
+
+    static void setOverlayTopMarginDp(Context context, int dp) {
+        commitPreferences(context, preferences(context).edit()
+                .putInt(KEY_OVERLAY_TOP_MARGIN_DP, clampOverlayTopMargin(dp)));
+    }
+
+    static int loadOverlayTopMarginDpForHook() {
+        try {
+            return clampOverlayTopMargin(hookPreferences().getInt(
+                    KEY_OVERLAY_TOP_MARGIN_DP, DEFAULT_OVERLAY_TOP_MARGIN_DP));
+        } catch (Throwable ignored) {
+            return DEFAULT_OVERLAY_TOP_MARGIN_DP;
+        }
+    }
+
+    private static int clampOverlayTopMargin(int dp) {
+        return Math.max(0, Math.min(MAX_OVERLAY_TOP_MARGIN_DP, dp));
     }
 
     static boolean isReplaceStoryVideoEnabled(Context context) {
