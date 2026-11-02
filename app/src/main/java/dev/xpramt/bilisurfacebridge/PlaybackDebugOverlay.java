@@ -57,7 +57,7 @@ final class PlaybackDebugOverlay {
             String media3State = ModulePreferences.loadMedia3FrameSyncForHook()
                     ? "On" : "Off";
             label.setText(media3State + " | Avg " + Math.round(fps) + "fps | 1%Low "
-                    + onePercentLow);
+                    + onePercentLow + " | " + renderer);
             mainHandler.postDelayed(this, 1000L);
         }
     };
@@ -238,7 +238,7 @@ final class PlaybackDebugOverlay {
             return "Texture";
         }
         if (rendererClass.contains("WithExternalRender")) {
-            return "Surface external";
+            return "Surface Ext";
         }
         if (rendererClass.contains("Surface")) {
             return "Surface";
