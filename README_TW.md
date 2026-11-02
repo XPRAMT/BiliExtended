@@ -10,12 +10,19 @@
 
 ## 設定
 
-設定在模組 App 裡改，也可以**直接在播放器裡改**：全螢幕播放時開右側「更多設定」面板，「播放反饋」那張卡片最上方有一列 **bilibili Ext**，點進去是同一組設定。
+設定在模組 App 裡改，也可以**直接在 Bilibili 裡改**，入口是 **bilibili Ext**，共有三個位置：
+
+- 全螢幕播放：播放器右側「更多設定」面板，「播放反饋」那張卡片最上方；
+- 影片頁的底部選單（右上角 ⋮）：在「更多播放設定」與「筆記」之間；
+- Bilibili 自己的**設置**頁：在「播放設定」與「下載設定」之間。
+
+點進去是同一組設定，面板會蓋在它所開啟的那個選單的位置。
 
 | 分組 | 設定 | 作用 | 生效時間 |
 |---|---|---|---|
 | 流暢度 | **影片渲染器**（`Texture`／`Surface external`／`Surface`） | 一般影片詳情頁播放器使用 Bilibili 的哪一個渲染器。`Texture` 與 `Surface external` 保留 Bilibili 的 external render／transform 路徑（縮放、旋轉、截圖）；直接 `Surface` 跳過它。**建議 `Surface external`**（理由見下文 2.2）。 | 立即，畫面會短暫重建 |
 | 流暢度 | **Media3 Vsync**（預設開啟） | 照 Media3 的方式排程並帶時間戳釋放影片幀，涵蓋 0.5x／1x／2x 倍速，見下文。 | 約 1–2 秒 |
+| 流暢度 | **原生解析度輸出**（預設關閉；只在面板解析度高於 UI 的螢幕上顯示，例如跑 1080p UI 的 4K Sony Xperia XZ Premium） | 影片畫進與面板同大的緩衝區，直接以面板的解析度送到顯示硬體，其餘 UI 維持原尺寸。可用於 `Surface external` 與 `Surface`；`Texture` 的畫面會被合成進 UI 層，無法做到。 | 立即 |
 | 流暢度 | **高通解碼器輸出 fence**（預設開啟） | 設定高通影片解碼器時加入 QTI 軟體輸出 fence 的 vendor key，讓解碼完成的幀更早交出；只在解碼器宣告支援這些 key 時套用。 | 下一支影片 |
 | 資訊浮層 | **fps 浮層** | 畫面上顯示一行 `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext`：Media3 Vsync 狀態、平均 fps、1% low、渲染器。fps 是 IJK 實際送幀數，不是螢幕 VSync。 | 立即 |
 | 資訊浮層 | **影音格式** | 解碼器確認的視訊格式與所選音訊格式、位元率、取樣率（例如 `HEVC \| Hi-Res 96KHz`）。與 fps 浮層各自獨立開關，兩項都開時接在同一行。 | 立即 |
@@ -25,6 +32,8 @@
 | 頁面行為 | **直式 Story 影片改用一般影片頁** | 把 `bilibili://story` 連結改道到一般影片路由，並移除 Story 專用的導向參數；不封鎖播放器內的滑動手勢。 | 立即 |
 
 在模組 App 裡改的設定，下次開啟 Bilibili 時生效。
+
+設定的唯一來源是模組 App 自己的偏好檔：hook 經模組 App 的 provider 讀取，只有 provider 連不上時才改讀框架保存的那份副本。日誌 `module preferences read from provider file=<路徑>`（或 `…from XSharedPreferences file=<路徑>`）會印出實際用到的檔案。
 
 在播放器裡改的設定，會存在 Bilibili 自己的資料夾，Bilibili 的所有行程即時共用；同時也會寫回模組 App，讓兩邊一致。寫回需要 Bilibili 看得到模組 App：部分系統（例如 RedMagic）有「讀取應用程式列表」的隱私開關，要替 Bilibili 開啟，否則設定只留在 Bilibili 裡，模組 App 的設定頁不會跟著變（功能不受影響）。
 
@@ -58,6 +67,16 @@
 
 - **小米／HyperOS 平板要關閉 Bilibili 的「平行視窗」**。開啟時 NPatch 會在啟動時出錯，模組不會載入。
 - NPatch 下模組透過模組 App 提供的唯讀 ContentProvider 讀設定；Bilibili 剛啟動的一兩秒讀不到，那段時間使用預設值。大多數設定在下一支影片就會生效。
+
+### LSPatch（免 root，NPatch 不能用時）
+
+部分裝置上 NPatch 1.0.9 會讓 Bilibili 啟動後卡死（Sony Xperia XZ Premium、Android 9 遇到過）。[LSPatch](https://github.com/JingMatrix/LSPatch)（v1.2-487）在這種裝置上可用，把模組嵌進修補後的 App：
+
+```
+java -jar lspatch-v1.2-487-release.jar bilibili-9.13.0.apk -m app-debug.apk -l 2 -f -o out
+```
+
+安裝 `out/` 裡修補後的 APK（要先解除安裝官方版）。**第一次啟動會重新編譯 220 MB 的 App，可能有數分鐘停在空白畫面**，請耐心等待。這個嵌入模式下模組讀不到模組 App 的設定（甚至不必安裝模組 App），一律使用預設值，所有調整都在 Bilibili 裡的 **bilibili Ext** 入口進行，變更會保存在 Bilibili 內。
 
 模組只會寫入 renderer 類別與非敏感的螢幕資訊到 Xposed log，不讀取帳號資料、Cookie、影片網址或播放授權值。
 

@@ -10,12 +10,19 @@ The module supports Android 7.0 / API 24 and later and registers `dev.xpramt.bil
 
 ## Settings
 
-Change them in the module app, or **right in the player**: in fullscreen playback open the player's right-hand "More settings" panel; at the top of the "Playback feedback" card there is a row called **bilibili Ext** that opens the same settings.
+Change them in the module app, or **right inside Bilibili** through the **bilibili Ext** entry. It is in three places:
+
+- fullscreen playback: the player's right-hand "More settings" panel, at the top of the "Playback feedback" card;
+- the bottom-sheet menu of the video page (⋮ at the top right): between "More playback settings" and "Notes";
+- Bilibili's own **Settings** page: between "Playback settings" and "Download settings".
+
+Each opens the same settings, in a panel that takes the place of the menu it was opened from.
 
 | Group | Setting | What it does | Takes effect |
 |---|---|---|---|
 | Smoothness | **Video renderer** (`Texture` / `Surface external` / `Surface`) | Which of Bilibili's own renderers the normal video-detail player uses. `Texture` and `Surface external` keep Bilibili's external-render/transform path (scale, rotate, capture); direct `Surface` skips it. **`Surface external` is recommended** (see 2.2 below). | Immediately; the picture is rebuilt briefly |
 | Smoothness | **Media3 Vsync** (default on) | Schedules and timestamps video frames the way Media3 does, at 0.5x / 1x / 2x speed. Described below. | About 1–2 s |
+| Smoothness | **Native resolution output** (default off; only shown on a screen whose panel is sharper than the UI, for example a 4K Sony Xperia XZ Premium running a 1080p UI) | Video is drawn into a full panel-size buffer, so it reaches the display hardware at the panel's own resolution while the rest of the UI keeps its size. Works with `Surface external` and `Surface`; not with `Texture`, whose picture is composited into the UI layer. | Immediately |
 | Smoothness | **Qualcomm decoder output fence** (default on) | Adds the QTI software output-fence vendor keys when configuring a Qualcomm video decoder, so decoded frames are handed out earlier. Only applied when the decoder declares those keys. | Next video |
 | Info overlay | **fps overlay** | One line on the picture: `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext` — Media3 Vsync state, average fps, 1 % low, renderer. The fps is what IJK actually delivers, not the screen's VSync. | Immediately |
 | Info overlay | **Stream format** | The decoder-confirmed video format and the selected audio format, bitrate and sample rate (for example `HEVC \| Hi-Res 96KHz`). Switched independently of the fps overlay; with both on they share one line. | Immediately |
@@ -25,6 +32,8 @@ Change them in the module app, or **right in the player**: in fullscreen playbac
 | Page behaviour | **Open Story videos in the normal video page** | Redirects `bilibili://story` links to the ordinary video route and removes the Story-only route flags. Swipe gestures inside a player are not blocked. | Immediately |
 
 Settings changed in the module app apply the next time Bilibili starts.
+
+The module app's own preferences are the single source of truth: the hooks read them through the module app's provider and use the framework's copy of the file only when the provider cannot be reached. The log line `module preferences read from provider file=<path>` (or `…from XSharedPreferences file=<path>`) names the file that was actually used.
 
 Settings changed in the player are kept in Bilibili's own data folder, which all of Bilibili's processes share, and are also written back to the module app so both agree. Writing back needs Bilibili to be able to see the module app: some systems (RedMagic, for one) have a "read the app list" privacy switch that must be turned on for Bilibili. Without it the setting stays inside Bilibili and the module app's settings page does not follow (nothing stops working).
 
@@ -58,6 +67,16 @@ Notes:
 
 - **On Xiaomi / HyperOS tablets, turn off parallel windows for Bilibili.** With it on, NPatch fails during startup and the module is not loaded.
 - Under NPatch the module reads its settings through a read-only ContentProvider in the module app; during the first second or two after Bilibili starts it cannot, and the defaults apply. Most settings take effect from the next video.
+
+### LSPatch (no root, when NPatch does not work)
+
+On some devices NPatch 1.0.9 leaves Bilibili frozen at start (seen on a Sony Xperia XZ Premium, Android 9). [LSPatch](https://github.com/JingMatrix/LSPatch) (v1.2-487) works there. Embed the module in the patched app:
+
+```
+java -jar lspatch-v1.2-487-release.jar bilibili-9.13.0.apk -m app-debug.apk -l 2 -f -o out
+```
+
+Install the patched APK from `out/` (uninstall the official app first). **The first launch recompiles the 220 MB app and can take several minutes with a blank screen**; wait for it. In this embedded mode the module cannot read the module app's settings (the module app need not be installed at all): defaults apply, and everything is changed from the **bilibili Ext** entry inside Bilibili, where the changes are kept.
 
 The module writes only renderer class and non-sensitive display facts to the Xposed log. It never reads account data, cookies, media URLs, or playback authorization values.
 
