@@ -233,17 +233,17 @@ final class PlaybackDebugOverlay {
         }
     }
 
+    // Bilibili's renderer classes are obfuscated (tv.danmaku.render.core.c), so the label comes
+    // from the renderer mode the module selected.
     private static String rendererName(String rendererClass) {
-        if (rendererClass.contains("Texture")) {
-            return "Texture";
+        switch (ModulePreferences.loadVideoDetailRendererModeForHook()) {
+            case TEXTURE_EXTERNAL:
+                return "Texture";
+            case SURFACE_EXTERNAL:
+                return "Surface Ext";
+            default:
+                return "Surface";
         }
-        if (rendererClass.contains("WithExternalRender")) {
-            return "Surface Ext";
-        }
-        if (rendererClass.contains("Surface")) {
-            return "Surface";
-        }
-        return rendererClass;
     }
 
     private static int dp(Activity activity, int value) {
