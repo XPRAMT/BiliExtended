@@ -417,27 +417,23 @@ final class ModulePreferences {
         return HOOK_VIEW.delegateTo(snapshot != null ? snapshot : cachedHookPreferences);
     }
 
-    // Values the in-player menu just changed: the module app writes the real preferences, which
-    // reach this process one or two seconds later, so the new value wins here until then.
-    private static final long HOST_OVERRIDE_TTL_NS = 15_000_000_000L;
-    private static final java.util.Map<String, Object[]> HOST_OVERRIDES =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    // Values the in-player menu changed, kept by HostOverrideStore: the module app owns the
+    // real preferences and cannot always be reached from Bilibili.
     private static final OverridePreferences HOOK_VIEW = new OverridePreferences();
 
+    /** Records a change made inside Bilibili; it takes effect in every Bilibili process. */
     static void setHostOverride(String key, Object value) {
-        HOST_OVERRIDES.put(key, new Object[]{value, System.nanoTime() + HOST_OVERRIDE_TTL_NS});
-    }
-
-    private static Object hostOverride(String key) {
-        Object[] entry = HOST_OVERRIDES.get(key);
-        if (entry == null) {
-            return null;
+        SharedPreferences module = HOOK_VIEW.delegate();
+        String moduleValue;
+        if (value instanceof Boolean) {
+            // An unset key reads as the opposite of the new value (see OverridePreferences).
+            moduleValue = String.valueOf(module.getBoolean(key, !(Boolean) value));
+        } else if (value instanceof Integer) {
+            moduleValue = String.valueOf(module.getInt(key, Integer.MIN_VALUE));
+        } else {
+            moduleValue = String.valueOf(module.getString(key, ""));
         }
-        if (System.nanoTime() > (Long) entry[1]) {
-            HOST_OVERRIDES.remove(key);
-            return null;
-        }
-        return entry[0];
+        HostOverrideStore.put(key, String.valueOf(value), moduleValue);
     }
 
     /** What the hooks read: the override first, everything else from the real preferences. */
@@ -455,25 +451,40 @@ final class ModulePreferences {
 
         @Override
         public boolean getBoolean(String key, boolean defValue) {
-            Object value = hostOverride(key);
-            return value instanceof Boolean ? (Boolean) value : delegate.getBoolean(key, defValue);
+            String[] entry = HostOverrideStore.get(key);
+            if (entry != null && entry[1].equals(String.valueOf(
+                    delegate.getBoolean(key, !Boolean.parseBoolean(entry[0]))))) {
+                return Boolean.parseBoolean(entry[0]);
+            }
+            return delegate.getBoolean(key, defValue);
         }
 
         @Override
         public String getString(String key, String defValue) {
-            Object value = hostOverride(key);
-            return value instanceof String ? (String) value : delegate.getString(key, defValue);
+            String[] entry = HostOverrideStore.get(key);
+            if (entry != null && entry[1].equals(String.valueOf(delegate.getString(key, "")))) {
+                return entry[0];
+            }
+            return delegate.getString(key, defValue);
         }
 
         @Override
         public int getInt(String key, int defValue) {
-            Object value = hostOverride(key);
-            return value instanceof Integer ? (Integer) value : delegate.getInt(key, defValue);
+            String[] entry = HostOverrideStore.get(key);
+            if (entry != null && entry[1].equals(String.valueOf(
+                    delegate.getInt(key, Integer.MIN_VALUE)))) {
+                try {
+                    return Integer.parseInt(entry[0]);
+                } catch (NumberFormatException ignored) {
+                    // Fall through to the module's value.
+                }
+            }
+            return delegate.getInt(key, defValue);
         }
 
         @Override
         public boolean contains(String key) {
-            return hostOverride(key) != null || delegate.contains(key);
+            return delegate.contains(key);
         }
 
         @Override

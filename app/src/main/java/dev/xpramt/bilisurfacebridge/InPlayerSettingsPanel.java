@@ -71,14 +71,14 @@ final class InPlayerSettingsPanel {
         // Above the player's controls, which sit in the same window.
         root.setElevation(dp(48));
 
+        // Transparent: the video stays as it is, a tap on it just closes the panel.
         View scrim = new View(activity);
-        scrim.setBackgroundColor(Color.argb(110, 0, 0, 0));
         scrim.setOnClickListener(v -> dismiss(root));
         root.addView(scrim, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         DisplayMetrics metrics = activity.getResources().getDisplayMetrics();
-        int width = Math.min(dp(400), Math.round(metrics.widthPixels * 0.62f));
+        int width = Math.min(dp(300), Math.round(metrics.widthPixels * 0.40f));
         LinearLayout panel = new LinearLayout(activity);
         panel.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable background = new GradientDrawable();

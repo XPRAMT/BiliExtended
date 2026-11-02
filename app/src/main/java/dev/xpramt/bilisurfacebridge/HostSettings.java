@@ -21,6 +21,23 @@ final class HostSettings {
         write(key, value);
     }
 
+    /** Why the provider cannot be reached, for the log (package visibility, not found, ...). */
+    private static String diagnose(Context context) {
+        try {
+            boolean visible = true;
+            try {
+                context.getPackageManager().getPackageInfo(ModulePreferences.PACKAGE_NAME, 0);
+            } catch (Throwable throwable) {
+                visible = false;
+            }
+            boolean provider = context.getPackageManager()
+                    .resolveContentProvider(ModulePreferencesProvider.AUTHORITY, 0) != null;
+            return "packageVisible=" + visible + " providerResolved=" + provider;
+        } catch (Throwable throwable) {
+            return "diagnosis failed " + throwable.getClass().getSimpleName();
+        }
+    }
+
     /** Only the provider write: for a slider that applies live and saves when released. */
     static void write(final String key, final Object value) {
         new Thread(new Runnable() {
@@ -48,8 +65,17 @@ final class HostSettings {
                         XposedBridge.log("BiliSurfaceBridge: setting " + key + " was not applied");
                     }
                 } catch (Throwable throwable) {
-                    XposedBridge.log("BiliSurfaceBridge: setting " + key + " failed: "
-                            + throwable.getClass().getSimpleName() + " " + throwable.getMessage());
+                    String why = "";
+                    try {
+                        why = " (" + diagnose((Context) XposedHelpers.callStaticMethod(
+                                XposedHelpers.findClass("android.app.ActivityThread", null),
+                                "currentApplication")) + ")";
+                    } catch (Throwable ignored) {
+                        // The diagnosis is only a hint.
+                    }
+                    XposedBridge.log("BiliSurfaceBridge: setting " + key + " not written to the "
+                            + "module app (" + throwable.getClass().getSimpleName() + ")" + why
+                            + "; kept inside Bilibili");
                 }
             }
         }, "BiliSurfaceBridge-set").start();
