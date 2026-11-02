@@ -492,6 +492,7 @@ final class ModulePreferences {
     private static volatile boolean providerRefreshRunning;
     private static volatile long providerCheckedNs;
     private static volatile boolean providerApplicationMissing;
+    private static volatile boolean fallbackLogged;
 
     private static synchronized SharedPreferences hookPreferences() {
         long now = System.nanoTime();
@@ -537,6 +538,12 @@ final class ModulePreferences {
         if (stale) {
             cachedHookPreferences.reload();
             cachedHookPreferencesNs = now;
+        }
+        if (!fallbackLogged) {
+            fallbackLogged = true;
+            File file = cachedHookPreferences.getFile();
+            Log.i(TAG, "module preferences read from XSharedPreferences file="
+                    + file.getAbsolutePath() + " readable=" + file.canRead());
         }
         return HOOK_VIEW.delegateTo(cachedHookPreferences);
     }
@@ -677,7 +684,8 @@ final class ModulePreferences {
             }
             if (!providerLogged) {
                 providerLogged = true;
-                Log.i(TAG, "module preferences read from provider keys="
+                Log.i(TAG, "module preferences read from provider file="
+                        + bundle.getString(SNAPSHOT_SOURCE_KEY) + " keys="
                         + new java.util.TreeSet<>(bundle.keySet()));
             }
             return new SnapshotPreferences(bundle);
@@ -698,11 +706,40 @@ final class ModulePreferences {
         }
     }
 
-    private static SharedPreferences preferences(Context context) {
+    /**
+     * The one file the module app reads and writes. With a framework hooking the module app,
+     * MODE_WORLD_READABLE lives in the framework's own directory, not in shared_prefs/: every
+     * access (UI, provider writes and the provider snapshot) must use this same call.
+     */
+    static SharedPreferences preferences(Context context) {
         try {
             return context.getSharedPreferences(PREFS_NAME, Context.MODE_WORLD_READABLE);
         } catch (SecurityException ignored) {
             return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        }
+    }
+
+    /** Key in the provider snapshot that names the file the module app really reads and writes. */
+    static final String SNAPSHOT_SOURCE_KEY = "_source_file";
+
+    /** Absolute path of the file behind {@link #preferences}, for the log; never guessed. */
+    static String preferencesFilePath(Context context) {
+        SharedPreferences preferences = preferences(context);
+        try {
+            java.lang.reflect.Field field = preferences.getClass().getDeclaredField("mFile");
+            field.setAccessible(true);
+            File file = (File) field.get(preferences);
+            return file.getAbsolutePath() + " (size=" + file.length()
+                    + " modified=" + file.lastModified() + ")";
+        } catch (Throwable ignored) {
+            // Hidden field blocked: fall through to the context's own answer.
+        }
+        try {
+            File file = (File) Context.class.getMethod("getSharedPreferencesPath", String.class)
+                    .invoke(context, PREFS_NAME);
+            return file.getAbsolutePath() + " (not confirmed: framework may redirect it)";
+        } catch (Throwable throwable) {
+            return "unknown (" + throwable.getClass().getSimpleName() + ")";
         }
     }
 

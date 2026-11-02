@@ -50,8 +50,9 @@ public final class ModulePreferencesProvider extends ContentProvider {
             return result;
         }
         Bundle snapshot = new Bundle();
-        Map<String, ?> values = context.getSharedPreferences(
-                ModulePreferences.PREFS_NAME, Context.MODE_PRIVATE).getAll();
+        snapshot.putString(ModulePreferences.SNAPSHOT_SOURCE_KEY,
+                ModulePreferences.preferencesFilePath(context));
+        Map<String, ?> values = ModulePreferences.preferences(context).getAll();
         for (Map.Entry<String, ?> entry : values.entrySet()) {
             Object value = entry.getValue();
             if (value instanceof Boolean) {
