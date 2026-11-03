@@ -78,7 +78,7 @@ public final class MainActivity extends Activity {
             return insets.consumeSystemWindowInsets();
         });
 
-        TextView title = text("Bili Surface Bridge", 25, PRIMARY);
+        TextView title = text("Bili Extended", 25, PRIMARY);
         title.setTypeface(null, Typeface.BOLD);
         content.addView(title);
         add(content, text("高幀率播放修正與資訊浮層", 14, ACCENT), 0, 5);

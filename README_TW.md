@@ -1,6 +1,6 @@
 ﻿[English](README.md) | [繁體中文](README_TW.md)
 
-# Bili Surface Bridge
+# Bili Extended
 
 給官方 Bilibili Android App（`tv.danmaku.bili`）用的 LSPosed 模組。它修正 Bilibili 內建 IJK 播放器在高幀率點播時的微卡頓（在 Nubia NX809J 與小米平板 6 Pro 上已壓到物理下限），讓你選擇一般影片詳情頁播放器的渲染器、在畫面上顯示實際的影音格式，並可自動挑選最佳音軌。不修改官方 APK，全部在執行期 Hook。
 
@@ -10,7 +10,7 @@
 
 ## 設定
 
-設定在模組 App 裡改，也可以**直接在 Bilibili 裡改**，入口是 **bilibili Ext**，共有三個位置：
+設定在模組 App 裡改，也可以**直接在 Bilibili 裡改**，入口是 **Bili Extended**，共有三個位置：
 
 - 全螢幕播放：播放器右側「更多設定」面板，「播放反饋」那張卡片最上方；
 - 影片頁的底部選單（右上角 ⋮）：在「更多播放設定」與「筆記」之間；
@@ -77,7 +77,7 @@
 java -jar lspatch-v1.2-487-release.jar bilibili-9.13.0.apk -m app-debug.apk -l 2 -f -o out
 ```
 
-安裝 `out/` 裡修補後的 APK（要先解除安裝官方版）。**第一次啟動會重新編譯 220 MB 的 App，可能有數分鐘停在空白畫面**，請耐心等待。這個嵌入模式下模組讀不到模組 App 的設定（甚至不必安裝模組 App），一律使用預設值，所有調整都在 Bilibili 裡的 **bilibili Ext** 入口進行，變更會保存在 Bilibili 內。
+安裝 `out/` 裡修補後的 APK（要先解除安裝官方版）。**第一次啟動會重新編譯 220 MB 的 App，可能有數分鐘停在空白畫面**，請耐心等待。這個嵌入模式下模組讀不到模組 App 的設定（甚至不必安裝模組 App），一律使用預設值，所有調整都在 Bilibili 裡的 **Bili Extended** 入口進行，變更會保存在 Bilibili 內。
 
 模組只會寫入 renderer 類別與非敏感的螢幕資訊到 Xposed log，不讀取帳號資料、Cookie、影片網址或播放授權值。
 

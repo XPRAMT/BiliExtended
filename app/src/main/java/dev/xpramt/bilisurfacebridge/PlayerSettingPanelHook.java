@@ -21,7 +21,7 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
 /**
- * Adds a "bilibili Ext" row to Bilibili's in-player settings panel (the right-hand panel of the
+ * Adds a "Bili Extended" row to Bilibili's in-player settings panel (the right-hand panel of the
  * fullscreen player). Tapping it opens {@link InPlayerSettingsPanel}.
  *
  * <p>How the panel works (PlayerSettingFunctionWidget2): onWidgetShow() decides which row ids go
@@ -41,7 +41,7 @@ final class PlayerSettingPanelHook {
             "com.bilibili.playerbizcommonv2.widget.setting.PlayerSettingFunctionWidget2";
     private static final int FEEDBACK_ROW = 8;
     private static final int EDIT_PLAYER_ROW = 9;
-    private static final String ROW_TITLE = "bilibili Ext";
+    private static final String ROW_TITLE = "Bili Extended";
     private static final String ROW_ICON = "nut-setting-line@500";
 
     private static ClassLoader hostLoader;

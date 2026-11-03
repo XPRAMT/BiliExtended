@@ -1,6 +1,6 @@
 ﻿[English](README.md) | [繁體中文](README_TW.md)
 
-# Bili Surface Bridge
+# Bili Extended
 
 An LSPosed module for the official Bilibili Android app (`tv.danmaku.bili`). It fixes the micro-stutter of Bilibili's built-in IJK player during high-frame-rate on-demand playback (down to the physical floor on a Nubia NX809J and a Xiaomi Pad 6 Pro), lets you pick the renderer of the normal video-detail player, shows the real video/audio format on screen, and can pick the best audio track automatically. Nothing in the official APK is modified; everything is hooked at runtime.
 
@@ -10,7 +10,7 @@ The module supports Android 7.0 / API 24 and later and registers `dev.xpramt.bil
 
 ## Settings
 
-Change them in the module app, or **right inside Bilibili** through the **bilibili Ext** entry. It is in three places:
+Change them in the module app, or **right inside Bilibili** through the **Bili Extended** entry. It is in three places:
 
 - fullscreen playback: the player's right-hand "More settings" panel, at the top of the "Playback feedback" card;
 - the bottom-sheet menu of the video page (⋮ at the top right): between "More playback settings" and "Notes";
@@ -77,7 +77,7 @@ On some devices NPatch 1.0.9 leaves Bilibili frozen at start (seen on a Sony Xpe
 java -jar lspatch-v1.2-487-release.jar bilibili-9.13.0.apk -m app-debug.apk -l 2 -f -o out
 ```
 
-Install the patched APK from `out/` (uninstall the official app first). **The first launch recompiles the 220 MB app and can take several minutes with a blank screen**; wait for it. In this embedded mode the module cannot read the module app's settings (the module app need not be installed at all): defaults apply, and everything is changed from the **bilibili Ext** entry inside Bilibili, where the changes are kept.
+Install the patched APK from `out/` (uninstall the official app first). **The first launch recompiles the 220 MB app and can take several minutes with a blank screen**; wait for it. In this embedded mode the module cannot read the module app's settings (the module app need not be installed at all): defaults apply, and everything is changed from the **Bili Extended** entry inside Bilibili, where the changes are kept.
 
 The module writes only renderer class and non-sensitive display facts to the Xposed log. It never reads account data, cookies, media URLs, or playback authorization values.
 
