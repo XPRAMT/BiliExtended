@@ -67,7 +67,7 @@ ExoPlayerImplInternal.doSomeWork()            每 10 ms 一次（固定排程）
 
 Queue→Present 落在 36–50 ms，與「目標前 40–50 ms 釋放、時間戳＝目標 − 0.8 格」相符。SurfaceFlinger 依時間戳扣住 buffer，直到它該上屏的那一格。
 
-## 6. 與 BiliSurfaceBridge 先前實作的差異
+## 6. 與 BiliExtended 先前實作的差異
 
 `Media3FrameSynchronizer.java`（2026-09 移植）只移植了第 3 節（時間戳計算）：VSync 取樣、80% 偏移、固定幀率估計。缺了第 2 節：
 

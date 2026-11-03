@@ -40,7 +40,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * facts without reading media URLs, account data, cookies, or playback authorization data.
  */
 public final class HookEntry implements IXposedHookLoadPackage {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final String TARGET_PACKAGE = "tv.danmaku.bili";
     private static final String IJK_SERVICE_PROCESS = "tv.danmaku.bili:ijkservice";
     private static final String FACTORY =

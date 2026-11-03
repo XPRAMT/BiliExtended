@@ -26,7 +26,7 @@ import de.robv.android.xposed.XposedHelpers;
  * buffer until its slot, exactly as for a Media3 player.
  */
 final class ExternalRenderTimestamps {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final String RENDER_THREAD_NAME = "ijk_ext_render";
     // Accept only timestamps that look like Media3 release times: not stale, at most ~100 ms
     // ahead.  A plain release(true) leaves the media PTS here, which must not be applied.

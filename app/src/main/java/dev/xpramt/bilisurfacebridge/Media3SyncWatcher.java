@@ -38,7 +38,7 @@ final class Media3SyncWatcher {
                         } else {
                             Media3FrameSynchronizer.disableNativeScheduling();
                         }
-                        XposedBridge.log("BiliSurfaceBridge: Media3 Vsync switched "
+                        XposedBridge.log("BiliExtended: Media3 Vsync switched "
                                 + (now ? "on" : "off") + " while playing");
                     } catch (InterruptedException interrupted) {
                         return;
@@ -47,7 +47,7 @@ final class Media3SyncWatcher {
                     }
                 }
             }
-        }, "BiliSurfaceBridge-vsync-watch");
+        }, "BiliExtended-vsync-watch");
         thread.setDaemon(true);
         thread.start();
     }

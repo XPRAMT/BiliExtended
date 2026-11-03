@@ -27,7 +27,7 @@ import de.robv.android.xposed.XposedHelpers;
  * release scheduling keeps that mid-way between two RenderThread draws.
  */
 final class TextureViewVsyncInvalidator {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final String RENDER_LAYER_MARKER = "RenderLayer";
     private static final Map<TextureView, Choreographer.FrameCallback> LOOPS =
             Collections.synchronizedMap(new WeakHashMap<TextureView, Choreographer.FrameCallback>());

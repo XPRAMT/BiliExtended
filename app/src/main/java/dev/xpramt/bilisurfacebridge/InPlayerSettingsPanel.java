@@ -497,7 +497,7 @@ final class InPlayerSettingsPanel {
     }
 
     private static void logFailure(String what, Throwable throwable) {
-        de.robv.android.xposed.XposedBridge.log("BiliSurfaceBridge: in-player settings " + what
+        de.robv.android.xposed.XposedBridge.log("BiliExtended: in-player settings " + what
                 + " failed: " + throwable.getClass().getSimpleName() + " "
                 + throwable.getMessage());
     }

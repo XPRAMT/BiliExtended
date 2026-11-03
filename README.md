@@ -40,7 +40,7 @@ Settings changed in the player are kept in Bilibili's own data folder, which all
 
 ## Install and verify
 
-The module APK is on [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExternal/releases). **Bilibili 9.13.0 and 9.17.0 are supported**: the native hooks have to find their functions in the IJK library (they check signatures and entry instructions and do not hook on a mismatch); on other versions only some Java features work.
+The module APK is on [GitHub Releases](https://github.com/XPRAMT/BiliExtended/releases). **Bilibili 9.13.0 and 9.17.0 are supported**: the native hooks have to find their functions in the IJK library (they check signatures and entry instructions and do not hook on a mismatch); on other versions only some Java features work.
 
 ### LSPosed (root)
 
@@ -48,7 +48,7 @@ The module APK is on [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExte
 2. Set its scope exclusively to Bilibili.
 3. Open the module, choose the renderer and switches you want.
 4. Force-stop and reopen Bilibili, then start a normal video.
-5. Search the LSPosed log for `BiliSurfaceBridge`. Successful attachment reports the selected video-detail renderer; with frame sync on, the IJK service logs `native release scheduling active` and `video-pictq-size default=min=12`.
+5. Search the LSPosed log for `BiliExtended`. Successful attachment reports the selected video-detail renderer; with frame sync on, the IJK service logs `native release scheduling active` and `video-pictq-size default=min=12`.
 
 ### NPatch (no root)
 
@@ -61,8 +61,8 @@ The module APK is on [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExte
    ```
    `-l 2` is the signature-bypass level Bilibili needs to sign in and play normally.
 3. On the device install the NPatch manager (same version as the patcher), this module's APK and the patched Bilibili from `out/`. The patched app is signed differently from the official one, so the official app must be uninstalled first; its sign-in and offline cache are lost.
-4. In the NPatch manager's Manage page, tap Bilibili and enable **BiliSurfaceBridge**.
-5. Fully close and reopen Bilibili. Search `adb logcat` for `BiliSurfaceBridge`: `module preferences read from provider` means the settings were read, and playback logs `native release scheduling active`.
+4. In the NPatch manager's Manage page, tap Bilibili and enable **BiliExtended**.
+5. Fully close and reopen Bilibili. Search `adb logcat` for `BiliExtended`: `module preferences read from provider` means the settings were read, and playback logs `native release scheduling active`.
 
 Notes:
 

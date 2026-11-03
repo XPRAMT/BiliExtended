@@ -41,7 +41,7 @@ final class HostOverrideStore {
     private static final Object LOCK = new Object();
     private static final ScheduledExecutorService FLUSHER =
             Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread thread = new Thread(r, "BiliSurfaceBridge-overrides");
+                Thread thread = new Thread(r, "BiliExtended-overrides");
                 thread.setDaemon(true);
                 return thread;
             });

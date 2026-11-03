@@ -45,7 +45,7 @@ import de.robv.android.xposed.XposedHelpers;
  * corresponding Media3 helper behavior as closely as the IJK hook surface allows.</p>
  */
 final class Media3FrameSynchronizer {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final long MAX_ALLOWED_ADJUSTMENT_NS = 20_000_000L;
     private static final long LINE_TOLERANCE_NS = 3_000_000L;
     // NX809J's SurfaceFlinger never deferred on desiredPresentTime, so the timestamp only
@@ -1920,7 +1920,7 @@ final class Media3FrameSynchronizer {
                 public void run() {
                     writeLoop();
                 }
-            }, "BiliSurfaceBridge-Media3Telemetry");
+            }, "BiliExtended-Media3Telemetry");
             thread.setDaemon(true);
             thread.start();
         }

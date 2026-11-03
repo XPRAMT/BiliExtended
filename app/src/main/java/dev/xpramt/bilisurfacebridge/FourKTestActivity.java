@@ -21,7 +21,7 @@ import android.view.View;
  * buffer is scaled, the pattern turns into moire or grey. Tap to close.
  */
 public final class FourKTestActivity extends Activity implements SurfaceHolder.Callback {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
 
     private SurfaceView surfaceView;
     private int bufferWidth;

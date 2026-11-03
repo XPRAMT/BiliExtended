@@ -15,7 +15,7 @@ import android.util.Log;
  * different quality or video follows, the configured renderer comes back.
  */
 final class HdrVideoRenderer {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final int QUALITY_HDR = 125;
     private static final int QUALITY_DOLBY_VISION = 126;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());

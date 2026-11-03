@@ -36,7 +36,7 @@ import de.robv.android.xposed.XposedHelpers;
  * Any mismatch leaves the panel untouched.
  */
 final class PlayerSettingPanelHook {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final String WIDGET_CLASS =
             "com.bilibili.playerbizcommonv2.widget.setting.PlayerSettingFunctionWidget2";
     private static final int FEEDBACK_ROW = 8;

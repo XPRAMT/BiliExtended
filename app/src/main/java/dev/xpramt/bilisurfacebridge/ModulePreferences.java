@@ -12,7 +12,7 @@ import de.robv.android.xposed.XSharedPreferences;
 
 /** Preferences shared by the module UI and the injected Bilibili process. */
 final class ModulePreferences {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     static final String PACKAGE_NAME = "dev.xpramt.bilisurfacebridge";
     static final String PREFS_NAME = "module";
     static final String KEY_VIDEO_DETAIL_RENDERER_MODE = "video_detail_renderer_mode";
@@ -541,7 +541,7 @@ final class ModulePreferences {
                 } finally {
                     providerRefreshRunning = false;
                 }
-            }, "BiliSurfaceBridge-prefs");
+            }, "BiliExtended-prefs");
             refresh.setDaemon(true);
             refresh.start();
         }

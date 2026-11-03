@@ -144,9 +144,9 @@ final class StoryRouteHook {
                 for (String key : STORY_CONTEXT_KEYS) {
                     XposedHelpers.callMethod(extras, "remove", key);
                 }
-                Log.i("BiliSurfaceBridge", "story route stripped Story context before build");
+                Log.i("BiliExtended", "story route stripped Story context before build");
             } catch (Throwable failure) {
-                Log.e("BiliSurfaceBridge", "story route context cleanup failed: "
+                Log.e("BiliExtended", "story route context cleanup failed: "
                         + failure.getClass().getSimpleName());
             }
         }

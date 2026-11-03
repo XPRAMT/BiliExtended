@@ -23,7 +23,7 @@ import de.robv.android.xposed.XposedBridge;
  * because the thread may not exist yet at attach time.
  */
 final class PipelineThreadBoost {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     static final String RENDER_THREAD_NAME = "ijk_ext_render";
     // Between THREAD_PRIORITY_DISPLAY (-4) and THREAD_PRIORITY_AUDIO (-16): ahead of every
     // nice-0 app thread without competing with the audio path.

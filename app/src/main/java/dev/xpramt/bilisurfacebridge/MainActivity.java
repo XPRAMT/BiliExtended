@@ -192,7 +192,7 @@ public final class MainActivity extends Activity {
         LinearLayout screen = card(content, "螢幕資訊");
         try {
             String report = ScreenPhysicalSize.describe(getWindowManager().getDefaultDisplay());
-            android.util.Log.i("BiliSurfaceBridge", "screen info: " + report);
+            android.util.Log.i("BiliExtended", "screen info: " + report);
             startItem(screen);
             add(screen, text(report, 14, PRIMARY), 0, 12);
             add(screen, text("螢幕的物理解析度可能比 UI 高（例如 Sony Xperia XZ Premium 的 4K 面板跑 1080p UI）。"

@@ -157,7 +157,7 @@ final class RenderCadenceProbe {
                         }
                     });
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: MessageQueue.enqueueMessage hook unavailable: "
+            XposedBridge.log("BiliExtended: MessageQueue.enqueueMessage hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
@@ -172,7 +172,7 @@ final class RenderCadenceProbe {
                         }
                     });
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: Choreographer.postCallbackDelayedInternal hook unavailable: "
+            XposedBridge.log("BiliExtended: Choreographer.postCallbackDelayedInternal hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
@@ -187,7 +187,7 @@ final class RenderCadenceProbe {
                         }
                     });
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: Choreographer.scheduleFrameLocked hook unavailable: "
+            XposedBridge.log("BiliExtended: Choreographer.scheduleFrameLocked hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         installedHooks += hookFrameDisplayEventReceiver();
@@ -242,7 +242,7 @@ final class RenderCadenceProbe {
                 receiverClass = XposedHelpers.findClass(
                         "android.view.Choreographer$FrameDisplayEventReceiver", null);
             } catch (Throwable bootLoaderFailure) {
-                XposedBridge.log("BiliSurfaceBridge: FrameDisplayEventReceiver class unavailable: "
+                XposedBridge.log("BiliExtended: FrameDisplayEventReceiver class unavailable: "
                         + bootLoaderFailure.getClass().getSimpleName());
                 return 0;
             }
@@ -277,7 +277,7 @@ final class RenderCadenceProbe {
                     onVsyncHook);
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: FrameDisplayEventReceiver.onVsync hook unavailable: "
+            XposedBridge.log("BiliExtended: FrameDisplayEventReceiver.onVsync hook unavailable: "
                     + throwable.getClass().getSimpleName());
             try {
                 Class<?> displayReceiverClass = XposedHelpers.findClass(
@@ -285,10 +285,10 @@ final class RenderCadenceProbe {
                 int fallbackHooks = hookAllOnVsyncMethods(displayReceiverClass, onVsyncHook);
                 hooks += fallbackHooks;
                 if (fallbackHooks == 0) {
-                    XposedBridge.log("BiliSurfaceBridge: DisplayEventReceiver has no reflected onVsync method");
+                    XposedBridge.log("BiliExtended: DisplayEventReceiver has no reflected onVsync method");
                 }
             } catch (Throwable fallbackThrowable) {
-                XposedBridge.log("BiliSurfaceBridge: DisplayEventReceiver.onVsync hook unavailable: "
+                XposedBridge.log("BiliExtended: DisplayEventReceiver.onVsync hook unavailable: "
                         + fallbackThrowable.getClass().getSimpleName());
             }
         }
@@ -299,10 +299,10 @@ final class RenderCadenceProbe {
                     displayReceiverClass, "dispatchVsync", dispatchVsyncHook);
             hooks += dispatchHooks;
             if (dispatchHooks == 0) {
-                XposedBridge.log("BiliSurfaceBridge: DisplayEventReceiver has no declared dispatchVsync method");
+                XposedBridge.log("BiliExtended: DisplayEventReceiver has no declared dispatchVsync method");
             }
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: DisplayEventReceiver.dispatchVsync hook unavailable: "
+            XposedBridge.log("BiliExtended: DisplayEventReceiver.dispatchVsync hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
@@ -317,7 +317,7 @@ final class RenderCadenceProbe {
             });
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: FrameDisplayEventReceiver.run hook unavailable: "
+            XposedBridge.log("BiliExtended: FrameDisplayEventReceiver.run hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         return hooks;
@@ -362,7 +362,7 @@ final class RenderCadenceProbe {
                     });
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: SurfaceTexture.updateTexImage hook unavailable: "
+            XposedBridge.log("BiliExtended: SurfaceTexture.updateTexImage hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
@@ -386,7 +386,7 @@ final class RenderCadenceProbe {
                     });
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: SurfaceTexture listener hook unavailable: "
+            XposedBridge.log("BiliExtended: SurfaceTexture listener hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         return hooks;

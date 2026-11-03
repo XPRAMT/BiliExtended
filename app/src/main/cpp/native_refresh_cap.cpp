@@ -34,7 +34,7 @@
 
 namespace {
 
-constexpr char kTag[] = "BiliSurfaceBridge";
+constexpr char kTag[] = "BiliExtended";
 constexpr size_t kRefreshLoopInstructionCount = 4;
 constexpr uint32_t kRefreshLoopRegister = 23;
 constexpr std::array<uintptr_t, kRefreshLoopInstructionCount> kRefreshLoopInstructionOffsets = {

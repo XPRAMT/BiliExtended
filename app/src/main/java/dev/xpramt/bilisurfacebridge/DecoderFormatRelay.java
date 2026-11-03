@@ -16,7 +16,7 @@ import de.robv.android.xposed.XposedHelpers;
  * injected processes cannot share Java static state.
  */
 final class DecoderFormatRelay {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final String TARGET_PACKAGE = "tv.danmaku.bili";
     private static final String ACTION_DECODER_CONFIGURED =
             "dev.xpramt.bilisurfacebridge.DECODER_CONFIGURED";

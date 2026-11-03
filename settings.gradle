@@ -15,5 +15,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "BiliSurfaceBridge"
+rootProject.name = "BiliExtended"
 include ':app'

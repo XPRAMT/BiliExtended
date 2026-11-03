@@ -40,7 +40,7 @@
 
 ## 安裝與驗證
 
-模組 APK 在 [GitHub Releases](https://github.com/XPRAMT/BiliSurfaceExternal/releases)。**支援 Bilibili 9.13.0 與 9.17.0**：原生 Hook 要在 IJK 函式庫裡找到對應的函式（核對特徵與入口指令，對不上就不掛鉤），其他版本只有部分 Java 功能可用。
+模組 APK 在 [GitHub Releases](https://github.com/XPRAMT/BiliExtended/releases)。**支援 Bilibili 9.13.0 與 9.17.0**：原生 Hook 要在 IJK 函式庫裡找到對應的函式（核對特徵與入口指令，對不上就不掛鉤），其他版本只有部分 Java 功能可用。
 
 ### LSPosed（root）
 
@@ -48,7 +48,7 @@
 2. 作用域只勾選 Bilibili。
 3. 開啟模組，選擇渲染器與要開的開關。
 4. 強制停止後重新開啟 Bilibili，再播放一般影片。
-5. 在 LSPosed log 搜尋 `BiliSurfaceBridge`；成功掛載時會出現選定的影片詳情 renderer，幀同步開啟時 IJK service 會記錄 `native release scheduling active` 與 `video-pictq-size default=min=12`。
+5. 在 LSPosed log 搜尋 `BiliExtended`；成功掛載時會出現選定的影片詳情 renderer，幀同步開啟時 IJK service 會記錄 `native release scheduling active` 與 `video-pictq-size default=min=12`。
 
 ### NPatch（免 root）
 
@@ -61,8 +61,8 @@
    ```
    `-l 2` 是簽名繞過等級，Bilibili 需要它才能正常登入與播放。
 3. 在裝置上安裝 NPatch 管理器（與修補用的版本相同）、本模組 APK，以及 `out/` 裡修補後的 Bilibili。修補版的簽名與官方版不同，必須先解除安裝官方版，登入狀態與離線快取會被清除。
-4. 在 NPatch 管理器的「管理」頁點 Bilibili，勾選 **BiliSurfaceBridge**。
-5. 完整關閉再開啟 Bilibili。在 `adb logcat` 搜尋 `BiliSurfaceBridge`：看到 `module preferences read from provider` 表示設定已讀到，播放時會出現 `native release scheduling active`。
+4. 在 NPatch 管理器的「管理」頁點 Bilibili，勾選 **BiliExtended**。
+5. 完整關閉再開啟 Bilibili。在 `adb logcat` 搜尋 `BiliExtended`：看到 `module preferences read from provider` 表示設定已讀到，播放時會出現 `native release scheduling active`。
 
 注意事項：
 

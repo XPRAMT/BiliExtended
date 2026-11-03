@@ -24,7 +24,7 @@ import de.robv.android.xposed.XposedBridge;
  * scheduler maps the same file and prefers it while it is fresh.
  */
 final class AppVsyncRelay {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     static final String FILE_NAME = "app_vsync_relay.bin";
     private static final int SIZE = 64;
     private static MappedByteBuffer buffer;

@@ -21,7 +21,7 @@ final class HostSettings {
         try {
             ModulePreferences.setHostOverride(key, value);
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliSurfaceBridge: setting " + key + " override failed: "
+            XposedBridge.log("BiliExtended: setting " + key + " override failed: "
                     + throwable.getClass().getSimpleName() + " " + throwable.getMessage());
         }
         write(key, value);
@@ -68,7 +68,7 @@ final class HostSettings {
                             ModulePreferencesProvider.URI, ModulePreferencesProvider.METHOD_SET,
                             key, extras);
                     if (result == null || !result.getBoolean("ok")) {
-                        XposedBridge.log("BiliSurfaceBridge: setting " + key + " was not applied");
+                        XposedBridge.log("BiliExtended: setting " + key + " was not applied");
                     } else {
                         // The module app has it now: it alone is the source again.
                         ModulePreferences.refreshProviderSnapshot();
@@ -83,11 +83,11 @@ final class HostSettings {
                     } catch (Throwable ignored) {
                         // The diagnosis is only a hint.
                     }
-                    XposedBridge.log("BiliSurfaceBridge: setting " + key + " not written to the "
+                    XposedBridge.log("BiliExtended: setting " + key + " not written to the "
                             + "module app (" + throwable.getClass().getSimpleName() + ")" + why
                             + "; kept inside Bilibili");
                 }
             }
-        }, "BiliSurfaceBridge-set").start();
+        }, "BiliExtended-set").start();
     }
 }

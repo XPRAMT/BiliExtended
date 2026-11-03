@@ -36,7 +36,7 @@ import de.robv.android.xposed.XposedHelpers;
  * VSync post if a renderer ever re-posts continuously.
  */
 final class ExternalRenderImmediate {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final String RENDER_THREAD_NAME = "ijk_ext_render";
     private static final long RATE_WINDOW_NS = 1_000_000_000L;
     private static final int MAX_IMMEDIATE_PER_WINDOW = 400;   // 120 fps plus margin

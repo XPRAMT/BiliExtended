@@ -781,7 +781,7 @@ function Test-HookRuntimeEvidence {
         same_boot_id = $sameBootId
         same_ijk_process_lifetime = $sameIjkLifetime
         current_pid_log_evidence = $observedCurrentPid.Count -gt 0
-        ijk_service_hooked = $afterText -match 'BiliSurfaceBridge.*(installed|hooked|Media3|IJK)'
+        ijk_service_hooked = $afterText -match 'BiliExtended.*(installed|hooked|Media3|IJK)'
         media3_runtime_telemetry = $afterText -match 'Media3 sync timed='
         timed_releases_nonzero_same_window = ($afterTimedMax -gt $beforeTimedMax)
         compute_target_delay_telemetry = $afterText -match 'compute_target_delay|computeTarget(?:>=|MaxMs=)'

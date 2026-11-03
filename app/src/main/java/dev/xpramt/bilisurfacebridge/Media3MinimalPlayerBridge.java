@@ -45,7 +45,7 @@ import de.robv.android.xposed.XposedHelpers;
  * start path; danmaku, subtitles, statistics and the official player UI remain untouched.</p>
  */
 final class Media3MinimalPlayerBridge {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final String IJK_PLAYER = "tv.danmaku.ijk.media.player.IjkMediaPlayer";
     private static final String IJK_ITEM = "tv.danmaku.ijk.media.player.IjkMediaPlayerItem";
     private static final String IJK_ASSET = "tv.danmaku.ijk.media.player.IjkMediaAsset";
@@ -1472,7 +1472,7 @@ final class Media3MinimalPlayerBridge {
                                 + " cookieRange=" + cookieRange
                                 + " cookiePresent=" + (cookie != null && !cookie.isEmpty()));
             }
-        }, "BiliSurfaceBridge-SourceProbe").start();
+        }, "BiliExtended-SourceProbe").start();
     }
 
     private static int probeSourceVariant(String sourceUrl, boolean withReferer,
@@ -1549,7 +1549,7 @@ final class Media3MinimalPlayerBridge {
                 }
                 probeLiveAudioBitrate(sourceUrl);
             }
-        }, "BiliSurfaceBridge-LiveBitrate").start();
+        }, "BiliExtended-LiveBitrate").start();
     }
 
     private static void probeLiveAudioBitrate(String sourceUrl) {
@@ -1839,7 +1839,7 @@ final class Media3MinimalPlayerBridge {
                 }
                 probeVodAudioBitrate(audioUrls, audioLabel, measurementGeneration);
             }
-        }, "BiliSurfaceBridge-VodBitrate").start();
+        }, "BiliExtended-VodBitrate").start();
     }
 
     private static void probeVodAudioBitrate(List<String> audioUrls, String audioLabel,

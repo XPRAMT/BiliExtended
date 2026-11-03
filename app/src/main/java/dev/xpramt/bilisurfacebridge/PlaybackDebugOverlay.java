@@ -144,10 +144,10 @@ final class PlaybackDebugOverlay {
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.TOP | Gravity.CENTER_HORIZONTAL));
             appliedX = Integer.MIN_VALUE;  // lay it out again at the stored position
-            android.util.Log.i("BiliSurfaceBridge", "info overlay was removed from "
+            android.util.Log.i("BiliExtended", "info overlay was removed from "
                     + activity.getClass().getSimpleName() + "; attached it again");
         } catch (Throwable throwable) {
-            android.util.Log.w("BiliSurfaceBridge", "info overlay could not be attached again: "
+            android.util.Log.w("BiliExtended", "info overlay could not be attached again: "
                     + throwable.getClass().getSimpleName());
         }
     }

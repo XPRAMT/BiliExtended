@@ -23,7 +23,7 @@ import java.util.List;
  * ({@link SurfaceHolder#setFixedSize}). The view itself, and so the UI, keeps its size.
  */
 final class NativeResolutionOutput {
-    private static final String TAG = "BiliSurfaceBridge";
+    private static final String TAG = "BiliExtended";
     private static final int REQUESTED_TAG = 0x7f0b5b20;
     private static final List<WeakReference<SurfaceView>> TRACKED = new ArrayList<>();
 
