@@ -6,7 +6,7 @@ An LSPosed module for the official Bilibili Android app (`tv.danmaku.bili`). It 
 
 - Supports Bilibili 9.13.0, 9.17.0 and 9.18.0 (the native hooks check the IJK library's signatures and stay off when they do not match; other versions get only part of the Java features).
 - Needs a framework that loads modules of the modern Xposed API (libxposed **API 102**), for example LSPosed 2.2.x; Android 7.0 / API 24 or later.
-- Root-cause analysis and fix guide for Bilibili's player engineers (in Chinese): [docs/bilibili-fix-guide.md](docs/bilibili-fix-guide.md).
+- Root-cause analysis and fix guide for Bilibili's player engineers (in Chinese): [docs/bilibili-fix-guide.md](docs/bilibili-fix-guide.md); the mechanisms added beyond Media3 (phase lock, cadence lock and others) and their measured gains (in Chinese): [docs/beyond-media3.md](docs/beyond-media3.md).
 
 ## Features
 
@@ -83,57 +83,60 @@ The ratio of F to R decides the case; each has its own pass condition.
 
 ## Test results
 
-Module 229, Bilibili 9.18.0, offline downloads, `Surface external` renderer. **Tested in performance mode**: on the phone Bilibili is in game mode; on the tablet the minimum frequency of the big cluster (cpu4–6) is pinned at its maximum and every round checks before recording that the system is not throttling it. Each combination ran 2–4 rounds; the table shows the best round (settled part).
+Module 229, Bilibili 9.18.0, offline downloads, `Surface external` renderer. **Tested in performance mode**: on the phone Bilibili is in game mode; on the tablet the minimum frequency of the big cluster (cpu4–6) is pinned at its maximum and every round checks before recording that the system is not throttling it. The fps overlay and the stream-format overlay were on during the tests (the slow-playback keepalive runs only while the fps overlay is on; see section 5 of [docs/beyond-media3.md](docs/beyond-media3.md)). Each combination ran 2–4 rounds; the table shows the best round (settled part).
+
+- **Content / panel frames**: content frames = source frame rate × speed, i.e. how many different pictures there are per second. Above the panel refresh rate the panel can show only one picture per refresh; the number in brackets is what the panel can show, e.g. `180 (120)`. No brackets means the panel can show them all.
+- **Measured frame rate**: new pictures the video layer actually presented per second in the settled part, from SurfaceFlinger's present records: (pictures − 1) ÷ time from the first to the last.
 
 **Phone**: Nubia NX809J (Snapdragon 8 Elite Gen 5, Android 16, panel measured at 120.28 Hz)
 
-| Video | Speed | Result | Settled-part metric |
-|---|---|---|---|
-| 1080p 24 fps AV1 | 0.25x | Pass | on-time 97.50 % |
-| 1080p 24 fps AV1 | 0.333x | Pass | on-time 93.33 % |
-| 1080p 24 fps AV1 | 0.5x | Pass | on-time 97.85 % |
-| 1080p 24 fps AV1 | 1x | Pass | on-time 98.45 % |
-| 1080p 24 fps AV1 | 2x | Pass | pacing deviation 0.50 |
-| 1080p 24 fps AV1 | 10x | Pass | parity flips 0 |
-| 4K 30 fps AV1 | 0.25x | Pass | on-time 94.55 % |
-| 4K 30 fps AV1 | 0.333x | Pass | on-time 96.10 % |
-| 4K 30 fps AV1 | 0.5x | Pass | on-time 98.33 % |
-| 4K 30 fps AV1 | 1x | Pass | on-time 99.19 % |
-| 4K 30 fps AV1 | 2x | Pass | on-time 99.39 % |
-| 4K 30 fps AV1 | 8x | Pass | parity flips 0 |
-| 4K 60 fps AV1 | 0.25x | Pass | on-time 100.00 % |
-| 4K 60 fps AV1 | 0.333x | Pass | on-time 98.15 % |
-| 4K 60 fps AV1 | 0.5x | Pass | on-time 99.18 % |
-| 4K 60 fps AV1 | 1x | Pass | on-time 99.40 % |
-| 4K 60 fps AV1 | 2x | Pass | on-time 99.70 % |
-| 4K 60 fps AV1 | 4x | Pass | parity flips 0 |
-| 4K 120 fps AVC | 0.25x | Pass | on-time 100.00 % |
-| 4K 120 fps AVC | 0.333x | Pass | on-time 99.70 % |
-| 4K 120 fps AVC | 0.5x | Pass | on-time 99.20 % |
-| 4K 120 fps AVC | 1x | Pass | on-time 99.70 % |
-| 4K 120 fps AVC | 2x | Pass | parity flips 0 |
+| Video | Speed | Content / panel frames (fps) | Measured frame rate (fps) | Result | Settled-part metric |
+| --- | --- | --- | --- | --- | --- |
+| 1080p 24 fps AV1 | 0.25x | 6 | 6.0 | Pass | on-time 97.50 % |
+| 1080p 24 fps AV1 | 0.333x | 8 | 8.0 | Pass | on-time 93.33 % |
+| 1080p 24 fps AV1 | 0.5x | 12 | 12.0 | Pass | on-time 97.85 % |
+| 1080p 24 fps AV1 | 1x | 24 | 24.0 | Pass | on-time 98.45 % |
+| 1080p 24 fps AV1 | 2x | 48 | 48.0 | Pass | pacing deviation 0.50 |
+| 1080p 24 fps AV1 | 10x | 240 (120) | 120.0 | Pass | parity flips 0 |
+| 4K 30 fps AV1 | 0.25x | 7.5 | 7.5 | Pass | on-time 94.55 % |
+| 4K 30 fps AV1 | 0.333x | 10 | 10.0 | Pass | on-time 96.10 % |
+| 4K 30 fps AV1 | 0.5x | 15 | 15.0 | Pass | on-time 98.33 % |
+| 4K 30 fps AV1 | 1x | 30 | 30.0 | Pass | on-time 99.19 % |
+| 4K 30 fps AV1 | 2x | 60 | 60.0 | Pass | on-time 99.39 % |
+| 4K 30 fps AV1 | 8x | 240 (120) | 120.1 | Pass | parity flips 0 |
+| 4K 60 fps AV1 | 0.25x | 15 | 15.0 | Pass | on-time 100.00 % |
+| 4K 60 fps AV1 | 0.333x | 20 | 20.0 | Pass | on-time 98.15 % |
+| 4K 60 fps AV1 | 0.5x | 30 | 30.0 | Pass | on-time 99.18 % |
+| 4K 60 fps AV1 | 1x | 60 | 60.0 | Pass | on-time 99.40 % |
+| 4K 60 fps AV1 | 2x | 120 | 120.0 | Pass | on-time 99.70 % |
+| 4K 60 fps AV1 | 4x | 240 (120) | 120.0 | Pass | parity flips 0 |
+| 4K 120 fps AVC | 0.25x | 30 | 30.1 | Pass | on-time 100.00 % |
+| 4K 120 fps AVC | 0.333x | 40 | 40.1 | Pass | on-time 99.70 % |
+| 4K 120 fps AVC | 0.5x | 60 | 60.0 | Pass | on-time 99.20 % |
+| 4K 120 fps AVC | 1x | 120 | 120.0 | Pass | on-time 99.70 % |
+| 4K 120 fps AVC | 2x | 240 (120) | 119.9 | Pass | parity flips 0 |
 
 **Tablet**: Xiaomi Pad 6 Pro (Snapdragon 8+ Gen 1, HyperOS / Android 15, 120 Hz panel)
 
-| Video | Speed | Result | Settled-part metric |
-|---|---|---|---|
-| 4K 120 fps AVC | 0.25x | Pass | on-time 100.00 % |
-| 4K 120 fps AVC | 0.333x | Pass | on-time 99.39 % |
-| 4K 120 fps AVC | 0.5x | Pass | on-time 100.00 % |
-| 4K 120 fps AVC | 1x | Pass | on-time 99.90 % |
-| 4K 120 fps AVC | 1.5x | Fail (decoder hardware limit: 4K at 180 fps) | pacing deviation 3.56 |
-| 4K 60 fps AVC | 0.25x | Pass | on-time 96.64 % |
-| 4K 60 fps AVC | 0.333x | Pass | on-time 99.38 % |
-| 4K 60 fps AVC | 0.5x | Pass | on-time 100.00 % |
-| 4K 60 fps AVC | 1x | Pass | on-time 100.00 % |
-| 4K 60 fps AVC | 1.5x | Pass | pacing deviation 0.35 |
-| 4K 60 fps AVC | 2x | Pass | on-time 100.00 % |
-| 4K 60 fps AVC | 3x | Fail (decoder hardware limit: 4K at 180 fps) | pacing deviation 3.28 |
-| 1080p 30 fps HEVC | 0.5x | Pass | on-time 100.00 % |
-| 1080p 30 fps HEVC | 1x | Pass | on-time 100.00 % |
-| 1080p 30 fps HEVC | 2x | Pass | on-time 100.00 % |
-| 1080p 30 fps HEVC | 3x | Pass | pacing deviation 0.35 |
-| 1080p 30 fps HEVC | 4x | Pass | on-time 100.00 % |
+| Video | Speed | Content / panel frames (fps) | Measured frame rate (fps) | Result | Settled-part metric |
+| --- | --- | --- | --- | --- | --- |
+| 4K 120 fps AVC | 0.25x | 30 | 30.0 | Pass | on-time 100.00 % |
+| 4K 120 fps AVC | 0.333x | 40 | 39.9 | Pass | on-time 99.39 % |
+| 4K 120 fps AVC | 0.5x | 60 | 60.0 | Pass | on-time 100.00 % |
+| 4K 120 fps AVC | 1x | 120 | 119.7 | Pass | on-time 99.90 % |
+| 4K 120 fps AVC | 1.5x | 180 (120) | 108.7 | Fail (decoder hardware limit: 4K at 180 fps) | pacing deviation 3.56 |
+| 4K 60 fps AVC | 0.25x | 15 | 14.9 | Pass | on-time 96.64 % |
+| 4K 60 fps AVC | 0.333x | 20 | 20.0 | Pass | on-time 99.38 % |
+| 4K 60 fps AVC | 0.5x | 30 | 30.0 | Pass | on-time 100.00 % |
+| 4K 60 fps AVC | 1x | 60 | 60.0 | Pass | on-time 100.00 % |
+| 4K 60 fps AVC | 1.5x | 90 | 90.0 | Pass | pacing deviation 0.35 |
+| 4K 60 fps AVC | 2x | 120 | 120.0 | Pass | on-time 100.00 % |
+| 4K 60 fps AVC | 3x | 180 (120) | 107.5 | Fail (decoder hardware limit: 4K at 180 fps) | pacing deviation 3.28 |
+| 1080p 30 fps HEVC | 0.5x | 15 | 15.0 | Pass | on-time 100.00 % |
+| 1080p 30 fps HEVC | 1x | 30 | 30.0 | Pass | on-time 100.00 % |
+| 1080p 30 fps HEVC | 2x | 60 | 60.0 | Pass | on-time 100.00 % |
+| 1080p 30 fps HEVC | 3x | 90 | 90.0 | Pass | pacing deviation 0.35 |
+| 1080p 30 fps HEVC | 4x | 120 | 120.0 | Pass | on-time 100.00 % |
 
 ## License
 
