@@ -9,6 +9,11 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
+import android.os.Trace;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
 import android.view.Choreographer;
 import android.view.Display;
 import android.view.Surface;
@@ -32,9 +37,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Media3 VideoFrameReleaseHelper-style video output synchronizer for Bilibili's IJK path.
@@ -59,6 +61,13 @@ final class Media3FrameSynchronizer {
     // hold-and-release path below is the fallback when that hook is unavailable.
     private static final boolean NATIVE_RELEASE_SCHEDULING = true;
     private static volatile boolean nativeSchedulingActive;
+
+    /** When native Media3 scheduling is active, overlay interval stats are recorded from
+     * non-skip releases only (see release path), not from every onVideoDisplay. */
+    static boolean overlayShouldCountVideoDisplayCallback() {
+        return !nativeSchedulingActive;
+    }
+    private static long scheduleTuningAppliedNs;
     private static volatile boolean nativeSchedulingRequested;
     private static long nativePassThroughReleases;
     private static final long MAX_CLOCK_DISCONTINUITY_US = 500_000L;
@@ -101,11 +110,16 @@ final class Media3FrameSynchronizer {
     private static final int MAX_PENDING_RENDER_TIMINGS = 4096;
     private static final long TIME_UNSET = Long.MIN_VALUE;
     private static final long INDEX_UNSET = -1L;
+    // The software-fence key is optional: the NX809J's AVC decoder declares the two output-fence keys below but not this one, and requiring all three made the whole switch a
+    // no-op there (measured 2026-11-11, qf1: "decoder does not declare all keys", qtiFenceConfigs=0).  The Moonlight forks (Axixi2233, qiin2333) set the three keys with the
+    // comments "sw-fence: Snapdragon 8 gen 2", "output-fence.enable / fence_type: 8s Gen 3 and Elite, fence_type 1 = sw is best".  So: the two output-fence keys are required,
+    // the sw key is added only on a decoder that declares it.
     private static final String QTI_SW_FENCE =
             "vendor.qti-ext-output-sw-fence-enable.value";
     private static final String QTI_OUTPUT_FENCE = "vendor.qti-ext-output-fence.enable";
     private static final String QTI_OUTPUT_FENCE_TYPE = "vendor.qti-ext-output-fence.fence_type";
     private static final List<String> QTI_FENCE_KEYS;
+    private static volatile int deadCodecReleases;   // codecs released by the leak guard in the stop() hook
     private static final Map<MediaCodec, CodecState> CODECS =
             Collections.synchronizedMap(new WeakHashMap<MediaCodec, CodecState>());
     private static final Map<MediaCodec, PendingRenderListener> PENDING_RENDER_LISTENERS =
@@ -114,8 +128,7 @@ final class Media3FrameSynchronizer {
             Collections.newSetFromMap(new WeakHashMap<MediaCodec, Boolean>());
 
     static {
-        List<String> keys = new ArrayList<String>(3);
-        keys.add(QTI_SW_FENCE);
+        List<String> keys = new ArrayList<String>(2);
         keys.add(QTI_OUTPUT_FENCE);
         keys.add(QTI_OUTPUT_FENCE_TYPE);
         QTI_FENCE_KEYS = Collections.unmodifiableList(keys);
@@ -149,9 +162,20 @@ final class Media3FrameSynchronizer {
     private static long cancelledCallReleases;
     private static HandlerThread releaseThread;
     private static Handler releaseHandler;
-    private static long qtiFenceConfigurations;
+    private static volatile long qtiFenceConfigurations;
+    private static volatile String qtiFenceLast = "";
+
+    /** For the rate-state file: how many video decoders this process configured with the QTI output fence, and the last one (a test reads it per round). */
+    static long qtiFenceConfigs() {
+        return qtiFenceConfigurations;
+    }
+
+    static String qtiFenceLast() {
+        return qtiFenceLast;
+    }
     private static long surfaceFrameRateHints;
     private static long lastReportNs;
+    private static boolean reportedOnce;
     private static long lastTimedReleaseNs;
     private static final String TELEMETRY_SESSION_ID =
             Long.toHexString(System.currentTimeMillis()) + "-" + Process.myPid();
@@ -159,7 +183,6 @@ final class Media3FrameSynchronizer {
     private static volatile long latestPlaybackPositionSampleNs = TIME_UNSET;
     private static volatile String latestPlayerLifecycle = "unknown";
     private static volatile boolean playbackClockHooksInstalled;
-    private static volatile TelemetryWriter telemetryWriter;
     private static volatile long telemetryDroppedRecords;
     private static final ThreadLocal<Boolean> INTERNAL_TIMED_RELEASE =
             new ThreadLocal<Boolean>() {
@@ -184,16 +207,16 @@ final class Media3FrameSynchronizer {
             return "Media3 frame-sync hooks already installed";
         }
         try {
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "configure", MediaFormat.class,
-                    Surface.class, MediaCrypto.class, int.class, new XC_MethodHook() {
+            Xp.findAndHookMethod(MediaCodec.class, "configure", MediaFormat.class,
+                    Surface.class, MediaCrypto.class, int.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             beforeConfigure((MediaCodec) param.thisObject,
                                     (MediaFormat) param.args[0]);
                         }
 
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             if (param.hasThrowable()) {
                                 logOnce("decoder-configure-failed:" + codecName(
                                                 (MediaCodec) param.thisObject),
@@ -205,11 +228,11 @@ final class Media3FrameSynchronizer {
                         }
                     });
             try {
-                XposedHelpers.findAndHookMethod(MediaCodec.class, "setOnFrameRenderedListener",
+                Xp.findAndHookMethod(MediaCodec.class, "setOnFrameRenderedListener",
                         MediaCodec.OnFrameRenderedListener.class, Handler.class,
-                        new XC_MethodHook() {
+                        new Xp.Hook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+                            protected void before(Xp.Param param) {
                                 if (Boolean.TRUE.equals(INTERNAL_RENDER_LISTENER_SETUP.get())) {
                                     return;
                                 }
@@ -224,10 +247,10 @@ final class Media3FrameSynchronizer {
                         "MediaCodec render callback hook unavailable: "
                                 + throwable.getClass().getSimpleName());
             }
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "dequeueOutputBuffer",
-                    MediaCodec.BufferInfo.class, long.class, new XC_MethodHook() {
+            Xp.findAndHookMethod(MediaCodec.class, "dequeueOutputBuffer",
+                    MediaCodec.BufferInfo.class, long.class, new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             Object result = param.getResult();
                             if (result instanceof Integer) {
                                 onOutputDequeued((MediaCodec) param.thisObject, (Integer) result,
@@ -235,16 +258,29 @@ final class Media3FrameSynchronizer {
                             }
                         }
                     });
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "start", new XC_MethodHook() {
+            try {
+                // When each input buffer is queued: with the matching dequeueOutputBuffer this is the decode latency (the way Moonlight measures "decode time"); always on
+                // for video decoders (a ring write per frame), the debug csv also carries it per frame.
+                Xp.findAndHookMethod(MediaCodec.class, "queueInputBuffer", int.class, int.class, int.class,
+                        long.class, int.class, new Xp.Hook() {
+                            @Override
+                            protected void before(Xp.Param param) {
+                                onInputQueued((MediaCodec) param.thisObject, (Long) param.args[3]);
+                            }
+                        });
+            } catch (Throwable throwable) {
+                logOnce("media3-input-queue-hook", "input queue telemetry unavailable: " + throwable.getClass().getSimpleName());
+            }
+            Xp.findAndHookMethod(MediaCodec.class, "start", new Xp.Hook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                protected void after(Xp.Param param) {
                     recordCodecLifecycle((MediaCodec) param.thisObject, "start", null);
                 }
             });
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "releaseOutputBuffer", int.class,
-                    boolean.class, new XC_MethodHook() {
+            Xp.findAndHookMethod(MediaCodec.class, "releaseOutputBuffer", int.class,
+                    boolean.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (Boolean.TRUE.equals(INTERNAL_TIMED_RELEASE.get())) {
                                 return;
                             }
@@ -256,10 +292,10 @@ final class Media3FrameSynchronizer {
                         }
                     });
             try {
-                XposedHelpers.findAndHookMethod(MediaCodec.class, "releaseOutputBuffer", int.class,
-                        long.class, new XC_MethodHook() {
+                Xp.findAndHookMethod(MediaCodec.class, "releaseOutputBuffer", int.class,
+                        long.class, new Xp.Hook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+                            protected void before(Xp.Param param) {
                                 if (!Boolean.TRUE.equals(INTERNAL_TIMED_RELEASE.get())) {
                                     recordDirectTimedRelease((MediaCodec) param.thisObject,
                                             (Integer) param.args[0], (Long) param.args[1]);
@@ -272,10 +308,10 @@ final class Media3FrameSynchronizer {
                                 + throwable.getClass().getSimpleName());
             }
             try {
-                XposedHelpers.findAndHookMethod(MediaCodec.class, "setOutputSurface", Surface.class,
-                        new XC_MethodHook() {
+                Xp.findAndHookMethod(MediaCodec.class, "setOutputSurface", Surface.class,
+                        new Xp.Hook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+                            protected void before(Xp.Param param) {
                                 recordCodecLifecycle((MediaCodec) param.thisObject,
                                         "setOutputSurface", param.args[0]);
                             }
@@ -285,16 +321,17 @@ final class Media3FrameSynchronizer {
                         "Surface change telemetry unavailable: "
                                 + throwable.getClass().getSimpleName());
             }
-            XC_MethodHook resetHook = new XC_MethodHook() {
+            Xp.Hook resetHook = new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     MediaCodec codec = (MediaCodec) param.thisObject;
                     String methodName = param.method.getName();
                     CodecState state = CODECS.get(codec);
                     long nowNs = System.nanoTime();
                     long sinceLastTimedReleaseMs = lastTimedReleaseNs == 0 ? 0
                             : (nowNs - lastTimedReleaseNs) / 1_000_000L;
-                    XposedBridge.log(TAG + ": [DEBUG-FRAME-LOCATE] codecLifecycle="
+if (DebugLog.enabled()) {
+                    Xp.log(TAG + ": [DEBUG-FRAME-LOCATE] codecLifecycle="
                             + methodName
                             + " codec=" + codecName(codec)
                             + " sinceLastTimedReleaseMs=" + sinceLastTimedReleaseMs
@@ -304,6 +341,7 @@ final class Media3FrameSynchronizer {
                             + " clockReanchors=" + clockReanchors
                             + " vsyncSnaps=" + vsyncSnaps
                             + " vsyncMode=" + vsyncSamplerMode);
+}
                     // Pending timed releases refer to buffer indices that are invalid after
                     // flush/stop/release; drop them before the codec state changes.
                     cancelScheduledReleases(codec);
@@ -319,11 +357,34 @@ final class Media3FrameSynchronizer {
                     }
                 }
             };
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "flush", resetHook);
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "stop", resetHook);
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "release", resetHook);
-            ensureTelemetryWriter();
-            installed = true;
+            Xp.findAndHookMethod(MediaCodec.class, "flush", resetHook);
+            Xp.findAndHookMethod(MediaCodec.class, "stop", resetHook);
+            Xp.findAndHookMethod(MediaCodec.class, "release", resetHook);
+            // A hardware decoder that died in the error state (its output surface was abandoned while IJK was still decoding, which is
+            // what leaving the player and reopening a clip does) makes stop() throw IllegalStateException.  IJK's error path then returns
+            // without ever calling release(), so the c2.qti.avc.decoder instance stays registered with the resource manager for the whole
+            // life of the :ijkservice process.  Measured 2026-11-09: after two such reopens the process held 2 leaked decoders, the 3rd
+            // instance failed to start (QC2 vppFltr VPP_ERR_INVALID_CFG -> MediaCodec NO_MEMORY) and IJK fell back to FFmpeg software
+            // decoding ("audio only" rounds, and the -3.1 rate after the player restarted).  Releasing a codec whose stop() has just thrown
+            // is always safe (the codec is unusable) and frees the instance at once.
+            Xp.findAndHookMethod(MediaCodec.class, "stop", new Xp.Hook() {
+                @Override
+                protected void after(Xp.Param param) {
+                    if (param.getThrowable() == null) {
+                        return;
+                    }
+                    MediaCodec dead = (MediaCodec) param.thisObject;
+                    try {
+                        dead.release();
+                        deadCodecReleases++;
+                        Xp.log(TAG + ": released a codec whose stop() threw " + param.getThrowable().getClass().getSimpleName()
+                                + " (leak guard, total " + deadCodecReleases + ")");
+                    } catch (Throwable ignored) {
+                        // already released
+                    }
+                }
+            });
+                installed = true;
             return "installed Media3 telemetry hooks and QTI configure hooks";
         } catch (Throwable throwable) {
             return "Media3 frame-sync hooks unavailable=" + throwable.getClass().getSimpleName();
@@ -337,10 +398,10 @@ final class Media3FrameSynchronizer {
      */
     static String installMainProcessDecoderFormatRelay() {
         try {
-            XposedHelpers.findAndHookMethod(MediaCodec.class, "configure", MediaFormat.class,
-                    Surface.class, MediaCrypto.class, int.class, new XC_MethodHook() {
+            Xp.findAndHookMethod(MediaCodec.class, "configure", MediaFormat.class,
+                    Surface.class, MediaCrypto.class, int.class, new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             if (param.hasThrowable()
                                     || !Thread.currentThread().getName().startsWith("ijk_")) {
                                 return;
@@ -366,6 +427,10 @@ final class Media3FrameSynchronizer {
     }
 
     private static void beforeConfigure(MediaCodec codec, MediaFormat format) {
+        if (isVideo(format) && DebugLog.enabled()) {
+            // The vendor SurfaceFlinger picks the panel mode from the frame rate its decoder reports (VTFps); this is what the app handed that decoder.
+            Xp.log(TAG + ": video decoder configure " + codecName(codec) + " format=" + format);
+        }
         if (!isVideo(format) || !experimentsEnabled() || !ModulePreferences.loadQtiOutputFenceForHook()
                 || !isQtiDecoder(codec)) {
             return;
@@ -376,12 +441,16 @@ final class Media3FrameSynchronizer {
                     "QTI output fence skipped; decoder does not declare all keys=" + supported);
             return;
         }
-        format.setInteger(QTI_SW_FENCE, 1);
+        final boolean swFence = supported.contains(QTI_SW_FENCE);
+        if (swFence) {
+            format.setInteger(QTI_SW_FENCE, 1);
+        }
         format.setInteger(QTI_OUTPUT_FENCE, 1);
         format.setInteger(QTI_OUTPUT_FENCE_TYPE, 1);
         qtiFenceConfigurations++;
+        qtiFenceLast = codecName(codec) + (swFence ? "+sw" : "");
         logOnce("qti-fence-enabled:" + codecName(codec),
-                "enabled QTI output software fence for decoder=" + codecName(codec));
+                "enabled QTI output fence (enable + fence_type" + (swFence ? " + sw fence" : ", sw-fence key not declared") + ") for decoder=" + codecName(codec));
     }
 
     private static void afterConfigure(MediaCodec codec, MediaFormat format, Surface surface) {
@@ -407,9 +476,10 @@ final class Media3FrameSynchronizer {
         synchronized (ACTIVE_VIDEO_CODECS) {
             ACTIVE_VIDEO_CODECS.add(codec);
         }
-        ensureTelemetryWriter();
         recordCodecLifecycle(codec, "configure", surface);
-        if (experimentsEnabled()) {
+        // Experiment switch (2026-11-09): `debug.biliextended.frcb` = 0 skips the module's own OnFrameRenderedListener (unset/1 = installed).  The HAL's onFramesRendered callback
+        // into this process coincided with ~500 ms stalls of the whole codec pipeline (MediaCodec_loop <-> Codec2 HAL binder calls both blocked); with frame sync off (no listener) none occur.
+        if (experimentsEnabled() && DebugLog.readInt("debug.biliextended.frcb", 1) != 0) {
             installRenderCallbackListener(codec, state);
         }
         if (experimentsEnabled() && ModulePreferences.loadMedia3FrameSyncForHook()) {
@@ -418,11 +488,116 @@ final class Media3FrameSynchronizer {
         }
     }
 
+    /**
+     * Hot reload, old generation: hand the decoders that are playing, their listeners and the playback rate to the next generation (framework and
+     * Bilibili objects only), then stop this generation's threads.  The render-callback thread outlives the hand-over by 2 s: until the next
+     * generation registers its own listener on a codec, callbacks still arrive here and must reach Bilibili's listener.
+     */
+    static void exportForHotReload(Map<String, Object> out) {
+        List<Object[]> codecs = new ArrayList<Object[]>();
+        synchronized (ACTIVE_VIDEO_CODECS) {
+            for (MediaCodec codec : ACTIVE_VIDEO_CODECS) {
+                CodecState state = CODECS.get(codec);
+                if (state == null) {
+                    continue;
+                }
+                synchronized (state) {
+                    codecs.add(new Object[]{codec, state.surface, state.applicationRenderListener, state.applicationRenderHandler});
+                }
+            }
+        }
+        out.put("m3.codecs", codecs);
+        out.put("m3.rate", Float.valueOf(latestPlaybackRate));
+        List<Object[]> clients = new ArrayList<Object[]>();
+        synchronized (CLIENT_RATES) {
+            for (Map.Entry<Object, Float> entry : CLIENT_RATES.entrySet()) {
+                clients.add(new Object[]{entry.getKey(), entry.getValue(), CLIENT_SEEN_NS.get(entry.getKey())});
+            }
+        }
+        out.put("m3.clients", clients);
+        nativeSchedulingActive = false;
+        final Handler vsync = vsyncHandler;
+        final HandlerThread vsyncLoop = vsyncThread;
+        if (vsync != null) {
+            vsync.post(() -> {
+                VSyncSampler sampler = vsyncSampler;
+                if (sampler != null) {
+                    sampler.unregister();
+                }
+                if (vsyncLoop != null) {
+                    vsyncLoop.quitSafely();
+                }
+            });
+        }
+        if (releaseThread != null) {
+            releaseThread.quitSafely();
+        }
+        final Handler render = renderCallbackHandler;
+        final HandlerThread renderLoop = renderCallbackThread;
+        if (render != null && renderLoop != null) {
+            render.postDelayed(renderLoop::quitSafely, 2000L);
+        }
+    }
+
+    /** Hot reload, new generation: take over what the old one handed over (see exportForHotReload). */
+    static String adoptAfterHotReload(Map<?, ?> in) {
+        if (in == null) {
+            return "nothing handed over";
+        }
+        Object clients = in.get("m3.clients");
+        if (clients instanceof List) {
+            for (Object item : (List<?>) clients) {
+                Object[] client = (Object[]) item;
+                if (client[0] != null && client[1] instanceof Float) {
+                    CLIENT_RATES.put(client[0], (Float) client[1]);
+                    CLIENT_SEEN_NS.put(client[0], client[2] instanceof Long ? (Long) client[2] : System.nanoTime());
+                }
+            }
+        }
+        Object rate = in.get("m3.rate");
+        if (rate instanceof Float) {
+            onPlaybackRate((Float) rate, "hot reload");
+        }
+        int adopted = 0;
+        Object codecs = in.get("m3.codecs");
+        if (codecs instanceof List) {
+            for (Object item : (List<?>) codecs) {
+                Object[] entry = (Object[]) item;
+                MediaCodec codec = (MediaCodec) entry[0];
+                Surface surface = (Surface) entry[1];
+                if (codec == null) {
+                    continue;
+                }
+                if (surface != null && ModulePreferences.loadMedia3FrameSyncForHook()) {
+                    NativeRefreshCap.setCompositorWindow(surface);
+                }
+                CodecState state = new CodecState(surface);
+                CODECS.put(codec, state);
+                synchronized (ACTIVE_VIDEO_CODECS) {
+                    ACTIVE_VIDEO_CODECS.add(codec);
+                }
+                if (entry[2] != null || entry[3] != null) {
+                    PENDING_RENDER_LISTENERS.put(codec, new PendingRenderListener(
+                            (MediaCodec.OnFrameRenderedListener) entry[2], (Handler) entry[3]));
+                }
+                if (experimentsEnabled() && DebugLog.readInt("debug.biliextended.frcb", 1) != 0) {
+                    installRenderCallbackListener(codec, state);
+                }
+                if (experimentsEnabled() && ModulePreferences.loadMedia3FrameSyncForHook()) {
+                    ensureVsyncSampler();
+                    requestVsyncRegistration();
+                }
+                adopted++;
+            }
+        }
+        return "adopted codecs=" + adopted + " rate=" + rate;
+    }
+
     private static void beforeSetOnFrameRenderedListener(
             MediaCodec codec,
             MediaCodec.OnFrameRenderedListener applicationListener,
             Handler applicationHandler,
-            XC_MethodHook.MethodHookParam param) {
+            Xp.Param param) {
         if (!experimentsEnabled()) {
             return;
         }
@@ -439,6 +614,7 @@ final class Media3FrameSynchronizer {
                 return;
             }
             state.applicationRenderListener = applicationListener;
+            state.applicationRenderHandler = applicationHandler;
             listenerGeneration = ++state.renderListenerGeneration;
             wrapper = createRenderListener(codec, state, applicationListener, listenerGeneration);
             state.renderListenerWrapper = wrapper;
@@ -463,6 +639,7 @@ final class Media3FrameSynchronizer {
         final MediaCodec.OnFrameRenderedListener wrapper;
         synchronized (state) {
             state.applicationRenderListener = applicationListener;
+            state.applicationRenderHandler = pending == null ? null : pending.handler;
             listenerGeneration = ++state.renderListenerGeneration;
             wrapper = createRenderListener(codec, state, applicationListener, listenerGeneration);
             state.renderListenerWrapper = wrapper;
@@ -537,6 +714,100 @@ final class Media3FrameSynchronizer {
         }
     }
 
+    private static void onInputQueued(MediaCodec codec, long presentationTimeUs) {
+        if (!DebugLog.monitor()) {
+            return;     // test-only: this ring exists for the decode-latency measurement and the csv detail
+        }
+        CodecState state = CODECS.get(codec);
+        if (state == null) {
+            return;
+        }
+        long nowNs = System.nanoTime();
+        synchronized (state.inputRing) {
+            int slot = state.inputRingPos;
+            state.inputRingPts[slot] = presentationTimeUs;
+            state.inputRingAtNs[slot] = nowNs;
+            state.inputRingPos = (slot + 1) % INPUT_RING;
+        }
+    }
+
+    // Decode latency, input buffer queued -> output buffer dequeued (user 2026-11-11: "add decoder latency measurement, see Moonlight").  Moonlight does the same: its PTS is the
+    // submit time and delta = now - PTS at dequeueOutputBuffer, samples outside 0..1000 ms dropped.  Here the input time is looked up by presentation timestamp in the
+    // per-codec ring above.  The last DECODE_LAT_RING frames are published in the rate state file once a second (n, mean, p50, p95, max in microseconds).
+    private static final int DECODE_LAT_RING = 1024;
+    private static final Object DECODE_LAT_LOCK = new Object();
+    private static final long[] DECODE_LAT_NS = new long[DECODE_LAT_RING];
+    private static int decodeLatPos;
+    private static long decodeLatTotal;
+
+    private static void recordDecodeLatency(CodecState state, long presentationTimeUs, long dequeuedAtNs) {
+        long queuedAtNs = 0L;
+        synchronized (state.inputRing) {
+            for (int i = 1; i <= INPUT_RING; i++) {
+                int slot = (state.inputRingPos - i + INPUT_RING) % INPUT_RING;
+                if (state.inputRingAtNs[slot] != 0L && state.inputRingPts[slot] == presentationTimeUs) {
+                    queuedAtNs = state.inputRingAtNs[slot];
+                    break;
+                }
+            }
+        }
+        if (queuedAtNs == 0L) {
+            return;
+        }
+        long latencyNs = dequeuedAtNs - queuedAtNs;
+        if (latencyNs < 0L || latencyNs >= 1_000_000_000L) {
+            return;
+        }
+        synchronized (DECODE_LAT_LOCK) {
+            DECODE_LAT_NS[decodeLatPos] = latencyNs;
+            decodeLatPos = (decodeLatPos + 1) % DECODE_LAT_RING;
+            decodeLatTotal++;
+        }
+    }
+
+    /** JSON fields (no braces) for the rate state file: decode latency of the last frames, microseconds; zeros before the first sample. */
+    static String decodeLatencyJson() {
+        long[] copy;
+        long total;
+        synchronized (DECODE_LAT_LOCK) {
+            total = decodeLatTotal;
+            int n = (int) Math.min(total, (long) DECODE_LAT_RING);
+            copy = new long[n];
+            for (int i = 0; i < n; i++) {
+                copy[i] = DECODE_LAT_NS[(decodeLatPos - n + i + DECODE_LAT_RING) % DECODE_LAT_RING];
+            }
+        }
+        if (copy.length == 0) {
+            return "\"decode_lat_n\":0,\"decode_lat_total\":0,\"decode_lat_mean_us\":0,\"decode_lat_p50_us\":0,\"decode_lat_p95_us\":0,\"decode_lat_max_us\":0";
+        }
+        java.util.Arrays.sort(copy);
+        long sum = 0L;
+        for (long v : copy) {
+            sum += v;
+        }
+        int n = copy.length;
+        return "\"decode_lat_n\":" + n + ",\"decode_lat_total\":" + total
+                + ",\"decode_lat_mean_us\":" + (sum / n / 1000L)
+                + ",\"decode_lat_p50_us\":" + (copy[n / 2] / 1000L)
+                + ",\"decode_lat_p95_us\":" + (copy[Math.min(n - 1, (int) (n * 0.95))] / 1000L)
+                + ",\"decode_lat_max_us\":" + (copy[n - 1] / 1000L);
+    }
+
+    /** csv detail fragment of the dequeued frame: when its input buffer was queued and the resulting decode latency; empty if not found. */
+    private static String inputTimingDetail(CodecState state, long presentationTimeUs, long dequeuedAtNs) {
+        synchronized (state.inputRing) {
+            for (int i = 1; i <= INPUT_RING; i++) {
+                int slot = (state.inputRingPos - i + INPUT_RING) % INPUT_RING;
+                if (state.inputRingAtNs[slot] != 0L && state.inputRingPts[slot] == presentationTimeUs) {
+                    return ";inputQueuedAtNs=" + state.inputRingAtNs[slot] + ";decodeLatencyNs=" + (dequeuedAtNs - state.inputRingAtNs[slot]);
+                }
+            }
+        }
+        return "";
+    }
+
+    private static final int INPUT_RING = 512;
+
     private static void onOutputDequeued(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
         if (index < 0 || info == null) {
             return;
@@ -546,6 +817,9 @@ final class Media3FrameSynchronizer {
             return;
         }
         long dequeuedAtNs = System.nanoTime();
+        if (DebugLog.monitor()) {
+            recordDecodeLatency(state, info.presentationTimeUs, dequeuedAtNs);
+        }
         FrameTiming timing;
         synchronized (state) {
             timing = new FrameTiming(index, info.presentationTimeUs, state.nextFrameIndex++,
@@ -561,7 +835,7 @@ final class Media3FrameSynchronizer {
         }
         recordFrameEvent(codec, index, timing, dequeuedAtNs, TIME_UNSET, TIME_UNSET,
                 TIME_UNSET, TIME_UNSET, TIME_UNSET, "DEQUEUED", true,
-                "dequeueOutputBuffer", "");
+                "dequeueOutputBuffer", telemetryEnabled() ? inputTimingDetail(state, info.presentationTimeUs, dequeuedAtNs) : "");
     }
 
     private static void recordFrameRendered(MediaCodec codec, CodecState state,
@@ -663,13 +937,29 @@ final class Media3FrameSynchronizer {
             //    the buffer carries it (SurfaceTexture.getTimestamp()) to ijk_ext_render, whose
             //    swap is timestamped there (ExternalRenderTimestamps).
             long releaseTs = NativeRefreshCap.takeReleaseTimestamp();
+            if (releaseTs > 0L && DebugLog.enabled()) {
+                // How far ahead of the real time the planned presentation timestamp is at the release call (negative = already late).
+                // Paired with bsb_ext_lead_us (the same timestamp at the GL swap) this separates "planned late" from "delayed on the way".
+                try {
+                    Trace.setCounter("bsb_rel_lead_us", (releaseTs - nowNs) / 1000L);
+                } catch (Throwable ignored) {
+                    // Measurement only.
+                }
+            }
+            // bisect bits (2026-11-09, `debug.biliextended.off`, re-read every 2 s): 512 = release with `true` instead of the timestamp, 1024 = never drop (a skip is released with `true`)
+            final int bisect = DebugLog.readInt("debug.biliextended.off", 0);
+            emitReleaseMarkBeforeCall(timing.presentationTimeUs, releaseTs == -2L);
             try {
                 INTERNAL_TIMED_RELEASE.set(Boolean.TRUE);
                 if (releaseTs > 0L) {
-                    codec.releaseOutputBuffer(index, releaseTs);
+                    if ((bisect & 512) != 0) {
+                        codec.releaseOutputBuffer(index, true);
+                    } else {
+                        codec.releaseOutputBuffer(index, releaseTs);
+                    }
                 } else if (releaseTs == -2L) {
                     // Media3 skip: content faster than the panel, this VSync is taken.
-                    codec.releaseOutputBuffer(index, false);
+                    codec.releaseOutputBuffer(index, (bisect & 1024) != 0);
                 } else {
                     codec.releaseOutputBuffer(index, true);
                 }
@@ -681,8 +971,27 @@ final class Media3FrameSynchronizer {
             } finally {
                 INTERNAL_TIMED_RELEASE.set(Boolean.FALSE);
             }
+            // Overlay interval / Avg / 1%Low: count actual handoffs only (not skip).
+            // Skipped frames must not update previousCallbackTimeNanos.
+            if (fired && releaseTs != -2L) {
+                PlaybackDebugOverlay.recordFrameCallback();
+            }
+            NativeRefreshCap.setDisplayedPts(timing.presentationTimeUs);
             NativeRefreshCap.noteDisplay(nowNs);
+            if (timing.dequeuedAtNs > 0L && nowNs > timing.dequeuedAtNs) {
+                NativeRefreshCap.noteDecodeWait(nowNs - timing.dequeuedAtNs);   // backlog signal of the late-frame skip (skipped frames included)
+            }
             long afterNs = System.nanoTime();
+            NativeRefreshCap.noteReleaseCall(afterNs - nowNs);   // low-overhead histogram in the native status line (no perfetto needed)
+            if (DebugLog.enabled()) {
+                // How long MediaCodec.releaseOutputBuffer itself blocked the single IJK refresh thread (a binder call into the codec service).  While it blocks,
+                // the next frame is not even evaluated.
+                try {
+                    Trace.setCounter("bsb_rel_call_us", (afterNs - nowNs) / 1000L);
+                } catch (Throwable ignored) {
+                    // Measurement only.
+                }
+            }
             synchronized (state) {
                 timing.releaseCallNs = nowNs;
                 timing.scheduledReleaseNs = nowNs;
@@ -694,7 +1003,8 @@ final class Media3FrameSynchronizer {
                     "reason=native;releaseTs=" + releaseTs
                             + ";releaseCallDurationNs=" + (afterNs - nowNs)
                             + ";nativeScheduling=true;nativePassThroughReleases="
-                            + nativePassThroughReleases);
+                            + nativePassThroughReleases
+                            + (telemetryEnabled() ? NativeRefreshCap.frameTimingDetail() : ""));
             maybeReport(nowNs);
             return fired;
         }
@@ -853,6 +1163,7 @@ final class Media3FrameSynchronizer {
                                             long releaseTimeNs, long decisionNowNs,
                                             String reason) {
         long nowNs = System.nanoTime();
+        emitReleaseMarkBeforeCall(timing.presentationTimeUs, false);
         try {
             INTERNAL_TIMED_RELEASE.set(Boolean.TRUE);
             if (RELEASE_WITH_TIMESTAMP) {
@@ -940,6 +1251,7 @@ final class Media3FrameSynchronizer {
                 || periodNs < MIN_VSYNC_DURATION_NS || periodNs > MAX_VSYNC_DURATION_NS) {
             return;
         }
+        applyScheduleTuningFromPreferencesThrottled(System.nanoTime());
         if (nativeGridAnchorNs == TIME_UNSET) {
             nativeGridAnchorNs = expectedPresentationNs;
         } else {
@@ -962,7 +1274,21 @@ final class Media3FrameSynchronizer {
         NativeRefreshCap.invalidateFrameTimer();
     }
 
+
+    /**
+     * Push live schedule prefs (ready window / late-drop) into this process's
+     * native atomics about every 2 s, so ijkservice follows the panel as well as the UI process.
+     */
+    private static void applyScheduleTuningFromPreferencesThrottled(long nowNs) {
+        if (nowNs - scheduleTuningAppliedNs < 2_000_000_000L && scheduleTuningAppliedNs != 0L) {
+            return;
+        }
+        scheduleTuningAppliedNs = nowNs;
+        NativeRefreshCap.applyScheduleTuningFromPreferences();
+    }
+
     private static synchronized void ensureNativeScheduling() {
+        applyScheduleTuningFromPreferencesThrottled(System.nanoTime());
         if (!NATIVE_RELEASE_SCHEDULING || nativeSchedulingActive) {
             return;
         }
@@ -997,6 +1323,7 @@ final class Media3FrameSynchronizer {
                 ? NativeRefreshCap.GRID_ARRIVAL : NativeRefreshCap.GRID_MEDIA3;
         NativeRefreshCap.setMedia3SkipSameVsync(
                 rendererMode == ModulePreferences.RendererMode.SURFACE_EXTERNAL);
+        NativeRefreshCap.applyScheduleTuningFromPreferences();
         String result = NativeRefreshCap.setReleaseScheduling(true, callLeadPercent, gridMode);
         nativeSchedulingActive = result != null && result.contains("active");
         logOnce("native-release-scheduling:" + nativeSchedulingActive, result
@@ -1004,7 +1331,7 @@ final class Media3FrameSynchronizer {
     }
 
     private static final int NATIVE_CALL_LEAD_DIRECT_PERCENT = 220;
-    private static final int NATIVE_CALL_LEAD_EXTERNAL_PERCENT = 245;
+    private static final int NATIVE_CALL_LEAD_EXTERNAL_PERCENT = 245;   // measured: 350 was worse at 1/3x (29-34% vs 45-50% slots_ok), so the lead is not the lever here
     // Texture: the GL thread draws immediately on arrival (ExternalRenderImmediate) and the
     // TextureView is redrawn on every UI VSync (TextureViewVsyncInvalidator), so the GL output
     // only has to sit mid-way between two RenderThread updateTexImage calls: same phase as
@@ -1215,11 +1542,11 @@ final class Media3FrameSynchronizer {
     /**
      * Per-frame CSV telemetry is a diagnostic: it builds a few hundred bytes of strings per
      * frame on the release thread, and the GC it caused showed up as 2-6 ms runnable delays on
-     * the pipeline threads.  Only the debug overlay (the measurement profile) turns it on; the
-     * release scheduling itself needs none of it.
+     * the pipeline threads.  Only the hidden DebugLog switch turns it on (the fps overlay does
+     * not); the release scheduling itself needs none of it.
      */
     private static boolean telemetryEnabled() {
-        return ModulePreferences.loadPlaybackDebugOverlayForHook();
+        return DebugLog.enabled();
     }
 
     // Former user switches of the Java fallback path, fixed at the values every successful
@@ -1298,7 +1625,7 @@ final class Media3FrameSynchronizer {
             return Collections.emptyList();
         }
         try {
-            Object result = XposedHelpers.callMethod(codec, "getSupportedVendorParameters");
+            Object result = Xp.callMethod(codec, "getSupportedVendorParameters");
             if (!(result instanceof Collection)) {
                 return Collections.emptyList();
             }
@@ -1404,7 +1731,7 @@ final class Media3FrameSynchronizer {
     private static Context currentApplicationContext() {
         try {
             Class<?> activityThread = Class.forName("android.app.ActivityThread");
-            Object application = XposedHelpers.callStaticMethod(activityThread,
+            Object application = Xp.callStaticMethod(activityThread,
                     "currentApplication");
             if (application instanceof Context) {
                 return ((Context) application).getApplicationContext();
@@ -1426,18 +1753,20 @@ final class Media3FrameSynchronizer {
         // IjkMediaPlayer.setSpeed never runs here, so without this the rate gate stayed 1.0.
         // Installed first and on its own: the IjkMediaPlayer hooks below can fail on a missing
         // method (NoSuchMethodError), which used to abort this one too.
+        AudioTrackProbe.install();
         String clientHook;
         try {
-            Class<?> clientClass = XposedHelpers.findClass(
+            Class<?> clientClass = Xp.findClass(
                     "tv.danmaku.ijk.media.player.services.IjkMediaPlayerClient", classLoader);
             hookPlayerMethod(clientClass, "setPropertyFloat",
-                    new Class<?>[]{int.class, float.class}, new XC_MethodHook() {
+                    new Class<?>[]{int.class, float.class}, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (((Integer) param.args[0]).intValue()
                                     == FFP_PROP_FLOAT_PLAYBACK_RATE) {
-                                onClientPlaybackRate(param.thisObject,
-                                        ((Number) param.args[1]).floatValue());
+                                float rate = forcedSpeed(((Number) param.args[1]).floatValue());
+                                param.args[1] = rate;
+                                onClientPlaybackRate(param.thisObject, rate);
                             }
                         }
                     });
@@ -1446,17 +1775,46 @@ final class Media3FrameSynchronizer {
             clientHook = " (IjkMediaPlayerClient.setPropertyFloat unavailable="
                     + throwable.getClass().getSimpleName() + ")";
         }
+        // In this (ijkservice) process nobody calls IjkMediaPlayer.getCurrentPosition(): Bilibili's
+        // main process asks over AIDL (IIjkMediaPlayer.getCurrentPosition), and the Stub
+        // implementation here is IjkMediaPlayerClient.getCurrentPosition() (9.13 and 9.17 both
+        // declare it).  Sampling the answer gives this process the player position, which is
+        // the IJK master (audio) clock in milliseconds.
         try {
-            final Class<?> playerClass = XposedHelpers.findClass(
-                    "tv.danmaku.ijk.media.player.IjkMediaPlayer", classLoader);
-            hookPlayerMethod(playerClass, "getCurrentPosition", new Class<?>[0],
-                    new XC_MethodHook() {
+            Class<?> clientClass = Xp.findClass(
+                    "tv.danmaku.ijk.media.player.services.IjkMediaPlayerClient", classLoader);
+            hookPlayerMethod(clientClass, "getCurrentPosition", new Class<?>[0],
+                    new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             Object result = param.getResult();
                             if (result instanceof Number) {
                                 latestPlaybackPositionUs = ((Number) result).longValue() * 1_000L;
                                 latestPlaybackPositionSampleNs = System.nanoTime();
+                                onClientPositionSample(param.thisObject, latestPlaybackPositionSampleNs);
+                                onAudioClockSample(latestPlaybackPositionSampleNs,
+                                        ((Number) result).longValue());
+                            }
+                        }
+                    });
+            clientHook += " +IjkMediaPlayerClient.getCurrentPosition";
+        } catch (Throwable throwable) {
+            clientHook += " (IjkMediaPlayerClient.getCurrentPosition unavailable="
+                    + throwable.getClass().getSimpleName() + ")";
+        }
+        try {
+            final Class<?> playerClass = Xp.findClass(
+                    "tv.danmaku.ijk.media.player.IjkMediaPlayer", classLoader);
+            hookPlayerMethod(playerClass, "getCurrentPosition", new Class<?>[0],
+                    new Xp.Hook() {
+                        @Override
+                        protected void after(Xp.Param param) {
+                            Object result = param.getResult();
+                            if (result instanceof Number) {
+                                latestPlaybackPositionUs = ((Number) result).longValue() * 1_000L;
+                                latestPlaybackPositionSampleNs = System.nanoTime();
+                                onAudioClockSample(latestPlaybackPositionSampleNs,
+                                        ((Number) result).longValue());
                             }
                         }
                     });
@@ -1469,10 +1827,12 @@ final class Media3FrameSynchronizer {
             // Playback speed: setSpeed(float) posts FFP_PROP_FLOAT_PLAYBACK_RATE (10003) to the
             // native player; both entry points feed the native scheduler's rate gate.
             hookPlayerMethod(playerClass, "setSpeed", new Class<?>[]{float.class},
-                    new XC_MethodHook() {
+                    new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            onPlaybackRate(((Number) param.args[0]).floatValue(), "setSpeed");
+                        protected void before(Xp.Param param) {
+                            float rate = forcedSpeed(((Number) param.args[0]).floatValue());
+                            param.args[0] = rate;
+                            onPlaybackRate(rate, "setSpeed");
                         }
                     });
             // _setPropertyFloat is not a Java method on 9.13/9.17 builds (rate goes through
@@ -1480,9 +1840,9 @@ final class Media3FrameSynchronizer {
             String rawRateHook;
             try {
                 hookPlayerMethod(playerClass, "_setPropertyFloat",
-                        new Class<?>[]{int.class, float.class}, new XC_MethodHook() {
+                        new Class<?>[]{int.class, float.class}, new Xp.Hook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+                            protected void before(Xp.Param param) {
                                 if (((Integer) param.args[0]).intValue() == FFP_PROP_FLOAT_PLAYBACK_RATE) {
                                     onPlaybackRate(((Number) param.args[1]).floatValue(),
                                             "_setPropertyFloat");
@@ -1503,6 +1863,22 @@ final class Media3FrameSynchronizer {
     }
 
     private static final int FFP_PROP_FLOAT_PLAYBACK_RATE = 10003;
+
+    /**
+     * Measurement switch: while {@code debug.biliextended.speed_milli} is set (333 = 0.333x), every playback-rate assignment is replaced
+     * by it, so a round starts at the wanted speed instead of walking the 倍速 menu (3.7 s per round).  0 / unset = disabled.
+     */
+    private static float forcedSpeed(float requested) {
+        int milli = DebugLog.readInt("debug.biliextended.speed_milli", 0);
+        if (milli <= 0 || milli > 10000) {
+            return requested;
+        }
+        float want = milli / 1000.0f;
+        if (Math.abs(want - requested) > 0.0001f && DebugLog.enabled()) {
+            Xp.log(TAG + ": forced playback rate " + want + " (player asked for " + requested + ")");
+        }
+        return want;
+    }
     private static float latestPlaybackRate = 1.0f;
 
     // Per native player: the service can host a preview player next to the main one, and the
@@ -1510,46 +1886,288 @@ final class Media3FrameSynchronizer {
     private static final Map<Object, Float> CLIENT_RATES =
             Collections.synchronizedMap(new WeakHashMap<Object, Float>());
 
+    // When each client was last asked for its position or given a rate.  CLIENT_RATES is weak, but a released player stays in it until the GC runs, and one that was
+    // left at 1.5x pinned the scheduler to 1.5x for the player started after it (measured 2026-11-10: native idealStepUs=5555 while the user played at 1.0x -- 28 over-limit
+    // chain resets per second, 32 % of the frames dropped as "excess", 66 % of the panel rate, 0.3-0.5 s holes).  Bilibili polls the position of a live player about every
+    // 100 ms, so a client that has not been asked for a few seconds is gone.
+    private static final Map<Object, Long> CLIENT_SEEN_NS =
+            Collections.synchronizedMap(new WeakHashMap<Object, Long>());
+    private static final long CLIENT_LIVE_NS = 3_000_000_000L;
+    private static final long CLIENT_RATE_RECHECK_NS = 500_000_000L;
+    private static long clientRatesCheckedNs;
+
+    /** The rate of the clients that are still alive: the first one that is off 1.0x, else 1.0. */
+    private static float liveClientRate(long nowNs) {
+        float effective = 1.0f;
+        synchronized (CLIENT_RATES) {
+            for (Map.Entry<Object, Float> entry : CLIENT_RATES.entrySet()) {
+                final Float value = entry.getValue();
+                if (value == null || Math.abs(value - 1.0f) < 0.01f) {
+                    continue;
+                }
+                final Long seen = CLIENT_SEEN_NS.get(entry.getKey());
+                if (seen == null || nowNs - seen > CLIENT_LIVE_NS) {
+                    continue;   // released, not collected yet
+                }
+                effective = value;
+                break;
+            }
+        }
+        return effective;
+    }
+
     private static void onClientPlaybackRate(Object client, float rate) {
         if (!(rate > 0f)) {
             return;
         }
-        float effective = 1.0f;
-        synchronized (CLIENT_RATES) {
-            CLIENT_RATES.put(client, rate);
-            for (Float value : CLIENT_RATES.values()) {
-                if (value != null && Math.abs(value - 1.0f) >= 0.01f) {
-                    effective = value;
-                    break;
-                }
-            }
-        }
-        onPlaybackRate(effective, "IjkMediaPlayerClient.setPropertyFloat");
+        final long now = System.nanoTime();
+        CLIENT_RATES.put(client, rate);
+        CLIENT_SEEN_NS.put(client, now);
+        onPlaybackRate(liveClientRate(now), "IjkMediaPlayerClient.setPropertyFloat");
     }
 
-    private static void onPlaybackRate(float rate, String source) {
+    /** A position sample proves its client is alive, and re-reads the live rate so that a released 2x player stops holding the scheduler at 2x. */
+    private static void onClientPositionSample(Object client, long nowNs) {
+        CLIENT_SEEN_NS.put(client, nowNs);
+        if (nowNs - clientRatesCheckedNs >= CLIENT_RATE_RECHECK_NS) {
+            clientRatesCheckedNs = nowNs;
+            onPlaybackRate(liveClientRate(nowNs), "live IJK clients");
+        }
+    }
+
+    // Media3 standard (VideoFrameReleaseControl.calculateEarlyTimeUs): every frame's release time
+    // is derived from the audio position at that moment, earlyUs = (PTS - position) / speed, so a
+    // wrong speed never accumulates and the video cannot run ahead of or behind the sound.  The
+    // scheduler lives in native_refresh_cap.cpp (scheduleMedia3); this side feeds it:
+    //  * every IJK position sample (IjkMediaPlayerClient.getCurrentPosition, the audio master
+    //    clock in content time, anchored by the audio callback with the output latency removed)
+    //    together with the time it was taken and the speed the clock really runs at;
+    //  * the speed is the slope of the position over the last ~0.8 s, not the requested rate
+    //    (Bilibili asks for 3.0 on a long press while the clock runs at ~2.0); at 1x it is
+    //    exactly 1.0, so the noise of the slope never reaches normal playback.
+    private static final long SPEED_WINDOW_NS = 800_000_000L;
+    private static final long SPEED_MIN_SPAN_NS = 250_000_000L;
+    private static final double SPEED_JUMP_MS = 400.0;
+    private static final int SPEED_RING = 64;
+    private static final Object CLOCK_LOCK = new Object();
+    private static final long[] speedNs = new long[SPEED_RING];
+    private static final long[] speedPosMs = new long[SPEED_RING];
+    private static int speedCount;
+    private static float requestedRate = 1.0f;
+    // AudioTrackPositionTracker: a new position is accepted only within +-10 % of the elapsed
+    // time of what the smoothed position predicts (MAX_POSITION_SMOOTHING_SPEED_CHANGE_PERCENT);
+    // a drift beyond 1 s (a seek) is taken as it is.
+    private static final double POSITION_SMOOTHING_PERCENT = 10.0;
+    private static final double POSITION_JUMP_MS = 1000.0;
+    private static double smoothedPositionMs = Double.NaN;
+    private static long smoothedAtNs;
+    // AudioTrackPositionTracker.maybeSampleSyncParams: the offset between the content position and
+    // the system clock times the speed (position - clock * speed) is averaged over the last 10
+    // samples, at any speed, and the average is reset when the speed changes.  The IJK clock is
+    // anchored by audio callbacks and jitters by about +-15 ms (std 14 ms, measured 2026-11-05),
+    // more than the 20 ms the frame-rate smoothing (adjustReleaseTime) tolerates.  For 2 s after a
+    // speed request (the audio clock ramps to the new speed) the position is only slewed to the
+    // samples within +-10 % of the elapsed time instead.
+    // Project-tuned, not upstream: Media3's AudioTrackPositionTracker averages 10 samples taken 30 ms apart
+    // and prefers AudioTrack.getTimestamp().  IJK's position wanders with a correlation time near a second,
+    // so 60 samples (about 5 s) are needed to keep the 1x release time inside adjustReleaseTime's 20 ms
+    // tolerance (measured 2026-11-05: >25 ms intervals per 30 s 4.8 with 10 samples, 0.17 with 60).
+    private static final PositionOffsetRing RING = new PositionOffsetRing();
+    private static long experimentCheckedNs;
+    private static int experiment;
+    private static final boolean AVERAGE_OFFSET_OFF_1X = true;
+    private static final long STEADY_AFTER_NS = 2_000_000_000L;
+    private static long rateChangedNs;
+
+    private static void onAudioClockSample(long nowNs, long positionMs) {
+        AudioTrackProbe.notePosition(nowNs, positionMs);
+        final double speed;
+        final double smoothed;
+        synchronized (CLOCK_LOCK) {
+            speed = clockSpeedLocked(nowNs, positionMs);
+            smoothed = smoothPositionLocked(nowNs, positionMs, speed);
+        }
+        if (DebugLog.readInt("debug.biliextended.decide", 0) == 1) {
+            android.util.Log.i("BilX", "SAMPLE t=" + nowNs / 1_000_000L + "ms raw=" + positionMs
+                    + " smooth=" + String.format(java.util.Locale.US, "%.2f", smoothed) + " n=" + RING.count());
+        }
+        NativeRefreshCap.noteAudioClock(Math.round(smoothed * 1_000.0), nowNs, speed);
+        if (Math.abs(speed - 1.0) >= 0.01) {
+            // Off 1x the scheduler also divides the PTS step by the speed (frame duration, cadence).
+            NativeRefreshCap.setPlaybackRateTrim((float) speed);
+        }
+    }
+
+    private static void refreshExperimentLocked(long nowNs) {
+        if (nowNs - experimentCheckedNs < 2_000_000_000L && experimentCheckedNs != 0L) {
+            return;
+        }
+        experimentCheckedNs = nowNs;
+        final int exp = DebugLog.readInt("debug.biliextended.exp", 0);
+        experiment = exp;
+        RING.setWindow(ExperimentPolicy.windowFor(exp));   // exp 1 = the old 10, 2 = 30, else 60; exp 4 changes smoothPositionLocked only
+    }
+
+    private static double smoothPositionLocked(long nowNs, long positionMs, double speed) {
+        refreshExperimentLocked(nowNs);
+        final boolean unity = Math.abs(requestedRate - 1.0f) < 0.01f;
+        if (unity || (AVERAGE_OFFSET_OFF_1X && nowNs - rateChangedNs > STEADY_AFTER_NS)) {
+            smoothedPositionMs = RING.smooth(nowNs, positionMs, speed);
+            smoothedAtNs = nowNs;
+            return smoothedPositionMs;
+        }
+        RING.reset();
+        if (Double.isNaN(smoothedPositionMs)) {
+            smoothedPositionMs = positionMs;
+            smoothedAtNs = nowNs;
+            return smoothedPositionMs;
+        }
+        final double elapsedMs = (nowNs - smoothedAtNs) / 1e6;
+        final double predicted = smoothedPositionMs + elapsedMs * speed;
+        final double delta = positionMs - predicted;
+        if (Math.abs(delta) > POSITION_JUMP_MS || elapsedMs < 0.0 || elapsedMs > 1000.0) {
+            smoothedPositionMs = positionMs;
+        } else {
+            final double maxStep = elapsedMs * speed * POSITION_SMOOTHING_PERCENT / 100.0;
+            smoothedPositionMs = predicted + Math.max(-maxStep, Math.min(maxStep, delta));
+        }
+        smoothedAtNs = nowNs;
+        return smoothedPositionMs;
+    }
+
+
+    // Until the slope is stable the requested rate would over-extrapolate the position (Bilibili
+    // asks for 3.0 on a long press while the clock runs at ~2.0; 40-90 ms of sample age at the
+    // wrong speed is more than the drop threshold).  2.0 is what was measured on NX809J with
+    // Bilibili 9.13.0, not an upstream constant.
+    private static final float MEASURED_SPEED_CAP = 2.0f;
+
+    // Upper bound of a clock slope that is believed: the speed menu goes up to 10x (SpeedSettings.MAX_RATE).  It was 4.0, which
+    // rejected the slope of a 5x long press and fell back to 2.0, so the native side scheduled at 2x (one frame per VSync).
+    private static final double MAX_MEASURED_SPEED = 10.5;
+    private static final double SPEED_SNAP_FRACTION = 0.10;
+    private static float lastAppliedLogged;
+
+    private static double fallbackSpeed() {
+        return requestedRate > 1.0f ? Math.min(requestedRate, MEASURED_SPEED_CAP) : requestedRate;
+    }
+
+    /**
+     * The speed to use while there are too few position samples for a slope (the first ~0.3-0.5 s after a start, a seek or a rate change).  The rate that really runs is
+     * known without measuring (see clockSpeedLocked: min(request, IJK max)), so it is used from the first sample on.  The old fallback capped it at 2.0: a clip started or
+     * sought at 4x was scheduled as 2x for that time (measured 2026-11-11, 4K60 AV1 at 4x, phone: frame duration 8.34 ms instead of 4.17, one frame per VSync and no
+     * same-VSync skip, so the decoder was paced at 120 frames/s for 0.5 s, the video fell 130 ms behind the sound, and with 250 frames/s decoded against 240 needed it took
+     * 4 s of irregular steps to recover; 3 of 8 rounds).  debug.biliextended.startrate=0 restores the old fallback.
+     */
+    private static double speedBeforeSlope() {
+        final float appliedMax = NativeRefreshCap.observedMaxRate();
+        if (requestedRate > 1.0f && appliedMax > 1.0f && DebugLog.readInt("debug.biliextended.appliedrate", 1) == 1
+                && DebugLog.readInt("debug.biliextended.startrate", 1) == 1) {
+            return Math.min(requestedRate, appliedMax);
+        }
+        return fallbackSpeed();
+    }
+
+    /** Speed of the audio clock: 1.0 at 1x, otherwise the slope of the recent samples. */
+    private static double clockSpeedLocked(long nowNs, long positionMs) {
+        if (Math.abs(requestedRate - 1.0f) < 0.01f) {
+            speedCount = 0;
+            return 1.0;
+        }
+        if (speedCount > 0) {
+            final double expected = speedPosMs[speedCount - 1]
+                    + (nowNs - speedNs[speedCount - 1]) / 1e6 * requestedRate;
+            // A seek or a stall breaks the line.
+            if (Math.abs(positionMs - expected) > SPEED_JUMP_MS * Math.max(1.0, requestedRate)) {
+                speedCount = 0;
+            }
+        }
+        if (speedCount == SPEED_RING) {
+            System.arraycopy(speedNs, 1, speedNs, 0, SPEED_RING - 1);
+            System.arraycopy(speedPosMs, 1, speedPosMs, 0, SPEED_RING - 1);
+            speedCount = SPEED_RING - 1;
+        }
+        speedNs[speedCount] = nowNs;
+        speedPosMs[speedCount] = positionMs;
+        speedCount++;
+        int first = 0;
+        while (first < speedCount - 1 && nowNs - speedNs[first] > SPEED_WINDOW_NS) {
+            first++;
+        }
+        final int n = speedCount - first;
+        if (n < 4 || speedNs[speedCount - 1] - speedNs[first] < SPEED_MIN_SPAN_NS) {
+            return speedBeforeSlope();
+        }
+        final double baseNs = speedNs[first];
+        final double basePos = speedPosMs[first];
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        for (int i = first; i < speedCount; i++) {
+            final double x = (speedNs[i] - baseNs) / 1e6;
+            final double y = speedPosMs[i] - basePos;
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+        }
+        final double denominator = n * sxx - sx * sx;
+        if (denominator <= 0.0) {
+            return speedBeforeSlope();
+        }
+        final double slope = (n * sxy - sx * sy) / denominator;
+        // Bilibili's tempo is applied in software at exactly the requested rate; the slope of the
+        // position samples only scatters around it (1/3x: 0.32-0.34, 0.25x: 0.237-0.242, measured
+        // 2026-11-07), and at 1/3x each 1 % of scatter is ~0.25 ms of frame duration per frame,
+        // enough to walk adjustReleaseTime past its 20 ms limit.  Within 10 % the requested rate is
+        // used; a real mismatch (long press asks 3.0, clock runs ~2.0) still takes the slope.
+        // The rate that really runs is known without measuring it: ffp_set_playback_rate stores min(request, GetMaxPlayRate) (disassembled,
+        // libijkplayer 9.13.0 / 9.17.0).  The only time the clock ran slower than the request was that cap (long press 3.0 -> 2.0), and the
+        // cap lift raises it to 10, so with the lift installed the applied rate is the request, or the cap if the request is above it.
+        // debug.biliextended.appliedrate=0 goes back to the slope below.
+        final float appliedMax = NativeRefreshCap.observedMaxRate();
+        if (appliedMax > 1.0f && DebugLog.readInt("debug.biliextended.appliedrate", 1) == 1) {
+            final float applied = Math.min(requestedRate, appliedMax);
+            if (applied != lastAppliedLogged && DebugLog.enabled()) {
+                lastAppliedLogged = applied;
+                Xp.log(TAG + ": applied playback rate " + applied + " (request " + requestedRate + ", IJK max " + appliedMax + ")");
+            }
+            return applied;
+        }
+        // Slow speeds (< 1x) are always exactly the requested rate: the clock samples scatter by ~30 ms of content time, which is +-100 ms of real time at 0.25x, so the 0.8 s slope
+        // left the +-10 % band about every fifth sample and the upward outliers (e.g. 0.285 for 0.25) were taken as the speed: the frame chain then advanced 29 ms instead of 33.3 per
+        // frame, slid against the VSync grid and flipped single frames one slot early (measured 2026-11-09).  debug.biliextended.slowexact=0 restores the old behaviour.
+        if (requestedRate < 0.99f && DebugLog.readInt("debug.biliextended.slowexact", 1) == 1) {
+            return requestedRate;
+        }
+        if (slope > 0.0 && Math.abs(slope / requestedRate - 1.0) < SPEED_SNAP_FRACTION) {
+            return requestedRate;
+        }
+        return slope > 0.25 && slope < MAX_MEASURED_SPEED ? slope : fallbackSpeed();
+    }
+
+    private static void onPlaybackRate(final float rate, String source) {
         if (!(rate > 0f) || rate == latestPlaybackRate) {
             return;
         }
         latestPlaybackRate = rate;
+        synchronized (CLOCK_LOCK) {
+            requestedRate = rate;
+            speedCount = 0;
+            rateChangedNs = System.nanoTime();
+        }
         NativeRefreshCap.setPlaybackRate(rate);
-        XposedBridge.log(TAG + ": playback rate " + rate + " via " + source
+        RateStateFile.onRateChanged(rate, rate, source);
+        Xp.log(TAG + ": playback rate " + rate + " via " + source
                 + (Math.abs(rate - 1.0f) < 0.01f ? " (VSync scheduling on)"
-                        : " (VSync scheduling bypassed)"));
+                        : " (video follows the audio clock)"));
     }
 
     private static void hookPlayerLifecycle(Class<?> playerClass, final String methodName,
                                             Class<?>[] parameterTypes) {
         try {
-            hookPlayerMethod(playerClass, methodName, parameterTypes, new XC_MethodHook() {
+            hookPlayerMethod(playerClass, methodName, parameterTypes, new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     latestPlayerLifecycle = methodName;
-                    enqueueTelemetry(eventLine(System.nanoTime(), "PLAYER_LIFECYCLE", "", -1,
-                            TIME_UNSET, TIME_UNSET, TIME_UNSET, latestPlaybackPositionUs,
-                            playbackPositionAgeMs(System.nanoTime()), TIME_UNSET, TIME_UNSET,
-                            TIME_UNSET, TIME_UNSET, methodName, false, methodName,
-                            "args=" + param.args.length));
                 }
             });
         } catch (Throwable throwable) {
@@ -1560,11 +2178,11 @@ final class Media3FrameSynchronizer {
     }
 
     private static void hookPlayerMethod(Class<?> playerClass, String methodName,
-                                         Class<?>[] parameterTypes, XC_MethodHook hook) {
+                                         Class<?>[] parameterTypes, Xp.Hook hook) {
         Object[] hookArgs = new Object[parameterTypes.length + 1];
         System.arraycopy(parameterTypes, 0, hookArgs, 0, parameterTypes.length);
         hookArgs[parameterTypes.length] = hook;
-        XposedHelpers.findAndHookMethod(playerClass, methodName, hookArgs);
+        Xp.findAndHookMethod(playerClass, methodName, hookArgs);
     }
 
     private static void recordCodecLifecycle(MediaCodec codec, String lifecycle, Object surface) {
@@ -1572,10 +2190,6 @@ final class Media3FrameSynchronizer {
             return;
         }
         String detail = surface == null ? "surface=null" : "surface=" + surface.getClass().getName();
-        enqueueTelemetry(eventLine(System.nanoTime(), "CODEC_LIFECYCLE", codecName(codec), -1,
-                TIME_UNSET, TIME_UNSET, TIME_UNSET, latestPlaybackPositionUs,
-                playbackPositionAgeMs(System.nanoTime()), TIME_UNSET, TIME_UNSET, TIME_UNSET,
-                TIME_UNSET, lifecycle, false, lifecycle, detail));
     }
 
     private static void recordRenderListenerLifecycle(
@@ -1590,10 +2204,6 @@ final class Media3FrameSynchronizer {
         String detail = "listenerPresent=" + (applicationListener != null)
                 + ";handler=" + (handler == null ? "null" : handler.getClass().getName())
                 + ";listenerGeneration=" + listenerGeneration;
-        enqueueTelemetry(eventLine(System.nanoTime(), "CODEC_LIFECYCLE", codecName(codec), -1,
-                TIME_UNSET, TIME_UNSET, TIME_UNSET, latestPlaybackPositionUs,
-                playbackPositionAgeMs(System.nanoTime()), TIME_UNSET, TIME_UNSET, TIME_UNSET,
-                TIME_UNSET, lifecycle, false, "MediaCodec.setOnFrameRenderedListener", detail));
     }
 
     private static void recordReleaseRequest(MediaCodec codec, int index, boolean render,
@@ -1635,12 +2245,71 @@ final class Media3FrameSynchronizer {
         }
     }
 
+    private static final ThreadLocal<Boolean> RELEASE_MARK_EMITTED = new ThreadLocal<Boolean>() {
+        @Override
+        protected Boolean initialValue() {
+            return Boolean.FALSE;
+        }
+    };
+
+    /**
+     * bsbR (and bsbK for a deliberate drop) BEFORE releaseOutputBuffer (2026-11-12).  Written after the call it was up to ~9 ms late when the thread was
+     * descheduled on the way back, i.e. after SurfaceFlinger had already queued the buffer; at 120 frames/s (8.3 ms apart) such a mark sits where the next
+     * frame's mark belongs and no pairing rule can tell them apart (ft2 bronya 4x: 2.3 % of the presents unpaired).  Before the call it can never be later
+     * than the queue.  Measurement only (DebugLog.monitor()); recordFrameEvent then skips its own R / K instant for this release.
+     */
+    private static void emitReleaseMarkBeforeCall(long ptsUs, boolean skip) {
+        if (!DebugLog.monitor()) {
+            return;
+        }
+        try {
+            Trace.beginSection(ptsUs == TIME_UNSET ? "bsbR" : "bsbR:" + ptsUs);
+            Trace.endSection();
+            if (skip && ptsUs != TIME_UNSET) {
+                Trace.beginSection("bsbK:" + ptsUs);
+                Trace.endSection();
+            }
+            RELEASE_MARK_EMITTED.set(Boolean.TRUE);
+        } catch (Throwable ignored) {
+            // Measurement only.
+        }
+    }
+
     private static void recordFrameEvent(MediaCodec codec, int index, FrameTiming timing,
                                          long eventNs, long playbackPositionUs,
                                          long positionAgeMs, long estimatedPositionUs,
                                          long unadjustedReleaseNs, long releaseTimeNs,
                                          String action, boolean render, String api,
                                          String detail) {
+        // perfetto trace: one instant per frame event, in the SAME trace as SurfaceFlinger's Queue/Present, so the module's decisions and
+        // the presentation timeline share one clock.  This replaces the CSV telemetry (which needed an offset, lagged by up to 20 s after a
+        // rate change, broke when truncated, and was 20-30 MB per capture).  Kept outside telemetryEnabled() so the CSV switch cannot
+        // disable the trace.  Test-only since 2026-11-11 (DebugLog.monitor()): the section names are built by string concatenation for every frame event.
+        if (DebugLog.monitor()) {
+            long ptsTrace = timing == null ? TIME_UNSET : timing.presentationTimeUs;
+            char kind = "TIMED_RELEASE_FIRED".equals(action) ? 'R'
+                    : "FRAME_RENDERED".equals(action) ? 'F'
+                    : "DEQUEUED".equals(action) ? 'D' : 0;
+            if (kind == 'R' && RELEASE_MARK_EMITTED.get()) {
+                RELEASE_MARK_EMITTED.set(Boolean.FALSE);       // bsbR (and bsbK) were written right before releaseOutputBuffer
+                kind = 0;
+            }
+            if (kind != 0) {
+                Trace.beginSection(ptsTrace == TIME_UNSET ? "bsb" + kind : "bsb" + kind + ":" + ptsTrace);
+                Trace.endSection();
+                // bsbK:<pts> = this frame was dropped on purpose by the native scheduler (releaseTs == -2: release(false), same-VSync skip,
+                // late-frame skip or a cadence-lock decimation).  It follows the frame's bsbR, so a frame with bsbK never reached the screen.
+                // The CSV used to carry this as releaseTs=-2; the trace had no way to tell "handed off" from "dropped".
+                if (kind == 'R' && ptsTrace != TIME_UNSET && detail != null && detail.contains("releaseTs=-2;")) {
+                    Trace.beginSection("bsbK:" + ptsTrace);
+                    Trace.endSection();
+                }
+            }
+            if (playbackPositionUs != TIME_UNSET) {
+                Trace.beginSection("bsbP:" + playbackPositionUs + ":" + positionAgeMs);
+                Trace.endSection();
+            }
+        }
         if (!telemetryEnabled()) {
             return;
         }
@@ -1665,21 +2334,6 @@ final class Media3FrameSynchronizer {
                 fixedFrameRateSynced = state.frameRateEstimator.isSynced();
             }
         }
-        enqueueTelemetry(eventLine(eventNs, "FRAME", codecName(codec), index, ptsUs, frameIndex,
-                dequeuedAtNs, playbackPositionUs, positionAgeMs, estimatedPositionUs, earlyUs,
-                unadjustedReleaseNs, releaseTimeNs, action, render, api,
-                detail + ";playerLifecycle=" + latestPlayerLifecycle
-                        + ";sampledVsyncId=" + sampledVsyncId
-                        + ";sampledVsyncNs=" + sampledVsyncNs
-                        + ";vsyncDurationNs=" + vsyncDurationNs
-                        + ";expectedPresentationNs=" + expectedPresentationNs
-                        + ";frameDeadlineNs=" + frameDeadlineNs
-                        + ";releaseToExpectedPresentationNs="
-                        + differenceOrUnset(releaseTimeNs, expectedPresentationNs)
-                        + ";releaseToSampledVsyncNs="
-                        + differenceOrUnset(releaseTimeNs, sampledVsyncNs)
-                        + ";frameDurationNs=" + frameDurationNs
-                        + ";fixedFrameRateSynced=" + fixedFrameRateSynced));
     }
 
     static void recordWindowFrameMetrics(long metricsAvailableNs, long intendedVsyncNs,
@@ -1706,20 +2360,12 @@ final class Media3FrameSynchronizer {
                 + differenceOrUnset(expectedPresentationNs, vsyncTimestampNs)
                 + ";totalDurationNs=" + totalDurationNs
                 + ";swapBuffersDurationNs=" + swapBuffersDurationNs;
-        enqueueTelemetry(eventLine(metricsAvailableNs, "WINDOW_FRAME_METRICS", "", -1,
-                TIME_UNSET, INDEX_UNSET, TIME_UNSET, TIME_UNSET, TIME_UNSET, TIME_UNSET,
-                TIME_UNSET, TIME_UNSET, TIME_UNSET, "FRAME_METRICS", true,
-                "Window.OnFrameMetricsAvailableListener", detail));
     }
 
     static void recordWindowFrameMetricsListenerState(String state) {
         if (!telemetryEnabled()) {
             return;
         }
-        enqueueTelemetry(eventLine(System.nanoTime(), "WINDOW_FRAME_METRICS_LISTENER", "", -1,
-                TIME_UNSET, INDEX_UNSET, TIME_UNSET, TIME_UNSET, TIME_UNSET, TIME_UNSET,
-                TIME_UNSET, TIME_UNSET, TIME_UNSET, state, true,
-                "Window.addOnFrameMetricsAvailableListener", "state=" + state));
     }
 
     private static long differenceOrUnset(long left, long right) {
@@ -1734,35 +2380,6 @@ final class Media3FrameSynchronizer {
         return nowNs - sampler.sampledVsyncTimeNs;
     }
 
-    private static String eventLine(long eventNs, String event, String codec, int index,
-                                    long ptsUs, long frameIndex, long dequeuedAtNs,
-                                    long playbackPositionUs, long positionAgeMs,
-                                    long estimatedPositionUs, long earlyUs,
-                                    long unadjustedReleaseNs, long releaseTimeNs,
-                                    String action, boolean render, String api, String detail) {
-        StringBuilder builder = new StringBuilder(256);
-        appendCsv(builder, telemetrySessionId());
-        appendCsv(builder, String.valueOf(eventNs));
-        appendCsv(builder, event);
-        appendCsv(builder, codec);
-        appendCsv(builder, String.valueOf(index));
-        appendCsv(builder, String.valueOf(ptsUs));
-        appendCsv(builder, String.valueOf(frameIndex));
-        appendCsv(builder, String.valueOf(dequeuedAtNs));
-        appendCsv(builder, String.valueOf(playbackPositionUs));
-        appendCsv(builder, String.valueOf(positionAgeMs));
-        appendCsv(builder, String.valueOf(estimatedPositionUs));
-        appendCsv(builder, String.valueOf(earlyUs));
-        appendCsv(builder, String.valueOf(unadjustedReleaseNs));
-        appendCsv(builder, String.valueOf(releaseTimeNs));
-        appendCsv(builder, action);
-        appendCsv(builder, String.valueOf(render));
-        appendCsv(builder, api);
-        appendCsv(builder, detail);
-        builder.setLength(builder.length() - 1);
-        builder.append('\n');
-        return builder.toString();
-    }
 
     private static void appendCsv(StringBuilder builder, String value) {
         if (value == null) {
@@ -1819,57 +2436,32 @@ final class Media3FrameSynchronizer {
         return Math.max(0L, (nowNs - latestPlaybackPositionSampleNs) / 1_000_000L);
     }
 
-    private static void ensureTelemetryWriter() {
-        if (telemetryWriter != null || !telemetryEnabled()) {
-            return;
-        }
-        synchronized (Media3FrameSynchronizer.class) {
-            if (telemetryWriter != null || !telemetryEnabled()) {
-                return;
-            }
-            try {
-                int userId = Process.myUid() / 100000;
-                File directory = new File("/data/user/" + userId
-                        + "/tv.danmaku.bili/files/bilisurfacebridge");
-                if (!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory()) {
-                    logOnce("media3-telemetry-directory", "telemetry directory unavailable");
-                    return;
-                }
-                telemetryWriter = new TelemetryWriter(
-                        new File(directory, "media3_frame_timing.csv"));
-                logOnce("media3-telemetry-file", "Media3 frame telemetry path="
-                        + new File(directory, "media3_frame_timing.csv").getAbsolutePath());
-            } catch (Throwable throwable) {
-                logOnce("media3-telemetry-writer", "telemetry writer unavailable="
-                        + throwable.getClass().getSimpleName());
-            }
-        }
-    }
 
-    private static void enqueueTelemetry(String line) {
-        if (!telemetryEnabled()) {
-            return;
-        }
-        ensureTelemetryWriter();
-        TelemetryWriter writer = telemetryWriter;
-        if (writer != null) {
-            writer.enqueue(line);
-        }
-    }
 
     private static void maybeReport(long nowNs) {
         if (nowNs - lastReportNs < 1_000_000_000L) {
             return;
         }
         lastReportNs = nowNs;
+        final float stateRequested;
+        synchronized (CLOCK_LOCK) {
+            stateRequested = requestedRate;
+        }
+        RateStateFile.publish(nowNs, stateRequested, latestPlaybackRate);   // the rate file a tool can read (see RateStateFile), written even with the debug log off
+        // The first report always goes out so the log shows the scheduling is active; after that
+        // the per-second statistics are diagnostics behind the hidden switch.
+        if (reportedOnce && !DebugLog.enabled() && !DebugLog.statEnabled()) {
+            return;
+        }
+        reportedOnce = true;
         VSyncSampler sampler = vsyncSampler;
         double vsyncMs = sampler == null || sampler.vsyncDurationNs == TIME_UNSET
                 ? 0.0 : sampler.vsyncDurationNs / 1_000_000.0;
         if (nativeSchedulingActive) {
-            XposedBridge.log(TAG + ": native release scheduling "
+            Xp.log(TAG + ": native release scheduling "
                     + NativeRefreshCap.releaseSchedulingStatus());
         }
-        XposedBridge.log(TAG + ": Media3 sync timed=" + timedReleases
+        Xp.log(TAG + ": Media3 sync timed=" + timedReleases
         + " predicted=" + predictedDeadlines
         + " resets=" + deadlineResets
                 + " clockReanchors=" + clockReanchors
@@ -1889,70 +2481,9 @@ final class Media3FrameSynchronizer {
     }
 
     private static void logOnce(String key, String message) {
-        XposedBridge.log(TAG + ": " + message);
+        Xp.log(TAG + ": " + message);
     }
 
-    private static final class TelemetryWriter {
-        private static final int QUEUE_CAPACITY = 32768;
-        private static final String HEADER =
-                "sessionId,eventNs,event,codec,bufferIndex,ptsUs,frameIndex,dequeuedAtNs,"
-                        + "playbackPositionUs,positionAgeMs,estimatedPositionUs,earlyUs,"
-                        + "unadjustedReleaseNs,releaseTimeNs,action,render,api,detail\n";
-        private final BlockingQueue<String> queue =
-                new ArrayBlockingQueue<String>(QUEUE_CAPACITY);
-        private final BufferedWriter writer;
-
-        TelemetryWriter(File file) throws IOException {
-            // The log grows by roughly 1 GB per hour of playback; a 17 GB file was found on
-            // the device.  Start over instead of appending to an oversized file.
-            if (file.exists() && file.length() > MAX_TELEMETRY_FILE_BYTES && !file.delete()) {
-                throw new IOException("oversized telemetry file could not be deleted");
-            }
-            boolean writeHeader = !file.exists() || file.length() == 0L;
-            writer = new BufferedWriter(new OutputStreamWriter(
-                    new FileOutputStream(file, true), "UTF-8"));
-            if (writeHeader) {
-                writer.write(HEADER);
-                writer.flush();
-            }
-            Thread thread = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    writeLoop();
-                }
-            }, "BiliExtended-Media3Telemetry");
-            thread.setDaemon(true);
-            thread.start();
-        }
-
-        void enqueue(String line) {
-            if (!queue.offer(line)) {
-                telemetryDroppedRecords++;
-            }
-        }
-
-        private void writeLoop() {
-            int pendingFlushes = 0;
-            while (true) {
-                try {
-                    String line = queue.take();
-                    writer.write(line);
-                    pendingFlushes++;
-                    if (pendingFlushes >= 16) {
-                        writer.flush();
-                        pendingFlushes = 0;
-                    }
-                } catch (InterruptedException interruptedException) {
-                    Thread.currentThread().interrupt();
-                    return;
-                } catch (IOException ioException) {
-                    logOnce("media3-telemetry-write", "telemetry write failed="
-                            + ioException.getClass().getSimpleName());
-                    return;
-                }
-            }
-        }
-    }
 
     private static final class PendingRenderListener {
         final MediaCodec.OnFrameRenderedListener listener;
@@ -2055,6 +2586,10 @@ final class Media3FrameSynchronizer {
                 new HashMap<Long, ArrayDeque<FrameTiming>>();
         final ArrayDeque<FrameTiming> pendingRenderOrder = new ArrayDeque<FrameTiming>();
         final Surface surface;
+        final Object inputRing = new Object();
+        final long[] inputRingPts = new long[INPUT_RING];
+        final long[] inputRingAtNs = new long[INPUT_RING];
+        int inputRingPos;
         final FixedFrameRateEstimator frameRateEstimator = new FixedFrameRateEstimator();
         long nextFrameIndex;
         long renderGeneration;
@@ -2066,6 +2601,8 @@ final class Media3FrameSynchronizer {
         long lastRenderCallbackObservedNs = TIME_UNSET;
         long lastRenderCallbackNanoTimeNs = TIME_UNSET;
         MediaCodec.OnFrameRenderedListener applicationRenderListener;
+        /** The handler Bilibili gave with its listener (null: the module's own); handed over in a hot reload. */
+        Handler applicationRenderHandler;
         MediaCodec.OnFrameRenderedListener renderListenerWrapper;
         long frameDurationNs = TIME_UNSET;
         long pendingLastPresentationTimeUs = TIME_UNSET;
@@ -2574,6 +3111,9 @@ final class Media3FrameSynchronizer {
 
         @Override
         public void doFrame(long vsyncTimeNs) {
+            if (!Generation.alive()) {
+                return;
+            }
             sampledVsyncId = TIME_UNSET;
             sampledVsyncTimeNs = vsyncTimeNs;
             sampledAtNs = System.nanoTime();
@@ -2631,6 +3171,9 @@ final class Media3FrameSynchronizer {
 
         @Override
         public void onVsync(Choreographer.FrameData data) {
+            if (!Generation.alive()) {
+                return;
+            }
             sampledVsyncTimeNs = data.getFrameTimeNanos();
             sampledAtNs = System.nanoTime();
             Choreographer.FrameTimeline preferred = data.getPreferredFrameTimeline();

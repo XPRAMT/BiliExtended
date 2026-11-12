@@ -50,20 +50,20 @@ final class NativeResolutionOutput {
             Class<?> renderer = Class.forName(
                     "tv.danmaku.ijk.media.player.render.output.IJKPlayerExternalRender", false,
                     loader);
-            de.robv.android.xposed.XposedHelpers.findAndHookMethod(renderer, "setDisplayRect",
-                    android.graphics.Rect.class, new de.robv.android.xposed.XC_MethodHook() {
+            Xp.findAndHookMethod(renderer, "setDisplayRect",
+                    android.graphics.Rect.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             externalRender = new WeakReference<Object>(param.thisObject);
                         }
                     });
             Class<?> wrap = Class.forName(
                     "tv.danmaku.ijk.media.player.render.output.IJKTerminalRenderWrap", false,
                     loader);
-            de.robv.android.xposed.XposedHelpers.findAndHookMethod(wrap, "setDisplayRect",
-                    android.graphics.Rect.class, new de.robv.android.xposed.XC_MethodHook() {
+            Xp.findAndHookMethod(wrap, "setDisplayRect",
+                    android.graphics.Rect.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             double scale = currentScale;
                             android.graphics.Rect rect = (android.graphics.Rect) param.args[0];
                             if (scale > 1.0 && rect != null) {
@@ -90,9 +90,9 @@ final class NativeResolutionOutput {
                 return;
             }
             android.graphics.Rect rect = (android.graphics.Rect)
-                    de.robv.android.xposed.XposedHelpers.callMethod(renderer, "getDisplayRect");
+                    Xp.callMethod(renderer, "getDisplayRect");
             if (rect != null) {
-                de.robv.android.xposed.XposedHelpers.callMethod(renderer, "setDisplayRect",
+                Xp.callMethod(renderer, "setDisplayRect",
                         new android.graphics.Rect(rect));
             }
         } catch (Throwable throwable) {
@@ -116,11 +116,11 @@ final class NativeResolutionOutput {
         for (final String[] target : targets) {
             try {
                 Class<?> owner = Class.forName(target[0]);
-                de.robv.android.xposed.XC_MethodHook hook = new de.robv.android.xposed.XC_MethodHook() {
+                Xp.Hook hook = new Xp.Hook() {
                     private final java.util.HashSet<String> seen = new java.util.HashSet<>();
 
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         if (!Thread.currentThread().getName().contains("ext_render")) {
                             return;
                         }
@@ -132,7 +132,7 @@ final class NativeResolutionOutput {
                 };
                 for (java.lang.reflect.Method method : owner.getDeclaredMethods()) {
                     if (method.getName().equals(target[1])) {
-                        de.robv.android.xposed.XposedBridge.hookMethod(method, hook);
+                        Xp.hookMethod(method, hook);
                     }
                 }
             } catch (Throwable throwable) {
@@ -152,10 +152,10 @@ final class NativeResolutionOutput {
             Class<?> type = Class.forName(
                     "tv.danmaku.ijk.media.player.render.output.IJKPlayerExternalRender", false,
                     loader);
-            de.robv.android.xposed.XposedHelpers.findAndHookMethod(type, "onSurfaceChange",
-                    int.class, int.class, new de.robv.android.xposed.XC_MethodHook() {
+            Xp.findAndHookMethod(type, "onSurfaceChange",
+                    int.class, int.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             Log.i(TAG, "onSurfaceChange " + param.args[0] + "x" + param.args[1]);
                         }
                     });
@@ -164,8 +164,63 @@ final class NativeResolutionOutput {
         }
     }
 
+    /** The render layers attached so far (Bilibili's views): a hot-reloaded generation attaches them again. */
+    private static final List<WeakReference<Object>> LAYERS = new ArrayList<>();
+
+    /** Hot reload: layers, tracked SurfaceViews, the renderer whose display rect is scaled, the scale in force. */
+    static Object[] exportForHotReload() {
+        List<Object> layers = new ArrayList<>();
+        synchronized (LAYERS) {
+            for (WeakReference<Object> reference : LAYERS) {
+                if (reference.get() != null) {
+                    layers.add(reference.get());
+                }
+            }
+        }
+        List<Object> views = new ArrayList<>();
+        synchronized (TRACKED) {
+            for (WeakReference<SurfaceView> reference : TRACKED) {
+                if (reference.get() != null) {
+                    views.add(reference.get());
+                }
+            }
+        }
+        WeakReference<Object> renderer = externalRender;
+        return new Object[]{layers, views, renderer == null ? null : renderer.get(), Double.valueOf(currentScale)};
+    }
+
+    static void adoptAfterHotReload(Object exported) {
+        if (!(exported instanceof Object[]) || ((Object[]) exported).length < 4) {
+            return;
+        }
+        Object[] state = (Object[]) exported;
+        if (state[3] instanceof Double) {
+            currentScale = (Double) state[3];
+        }
+        if (state[2] != null) {
+            externalRender = new WeakReference<Object>(state[2]);
+        }
+        if (state[1] instanceof List) {
+            for (Object view : (List<?>) state[1]) {
+                if (view instanceof SurfaceView) {
+                    track((SurfaceView) view);
+                }
+            }
+        }
+        if (state[0] instanceof List) {
+            for (Object layer : (List<?>) state[0]) {
+                if (layer != null) {
+                    attach(layer);
+                }
+            }
+        }
+    }
+
     static void attach(Object layer) {
         hookDisplayRect(layer.getClass().getClassLoader());
+        synchronized (LAYERS) {
+            LAYERS.add(new WeakReference<Object>(layer));
+        }
         if (!(layer instanceof View)) {
             return;
         }
@@ -174,6 +229,10 @@ final class NativeResolutionOutput {
             @Override
             public void onLayoutChange(View view, int left, int top, int right, int bottom,
                                        int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                if (!Generation.alive()) {
+                    root.removeOnLayoutChangeListener(this);   // handed over: the next generation listens itself
+                    return;
+                }
                 SurfaceView surfaceView = findSurfaceView(root, 0);
                 if (surfaceView != null) {
                     track(surfaceView);

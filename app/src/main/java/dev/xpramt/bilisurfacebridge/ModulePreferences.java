@@ -1,20 +1,16 @@
 package dev.xpramt.bilisurfacebridge;
 
-import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
 
-import java.io.File;
 import java.util.Map;
 import java.util.Set;
 
-import de.robv.android.xposed.XSharedPreferences;
 
 /** Preferences shared by the module UI and the injected Bilibili process. */
 final class ModulePreferences {
     private static final String TAG = "BiliExtended";
     static final String PACKAGE_NAME = "dev.xpramt.bilisurfacebridge";
-    static final String PREFS_NAME = "module";
     static final String KEY_VIDEO_DETAIL_RENDERER_MODE = "video_detail_renderer_mode";
     static final String KEY_PLAYBACK_DEBUG_OVERLAY = "playback_debug_overlay";
     static final String KEY_PLAYBACK_STREAM_OVERLAY = "playback_stream_overlay";
@@ -53,7 +49,7 @@ final class ModulePreferences {
     static final boolean DEFAULT_MEDIA3_FRAME_SYNC = true;
     // IJK earlyUs is retained as an explicit experiment. On NX809J its native clock sample can
     // lead the release deadline by hundreds of milliseconds, so it must not be the safe default.
-    static final boolean DEFAULT_QTI_OUTPUT_FENCE = true;
+    static final boolean DEFAULT_QTI_OUTPUT_FENCE = false;   // off: with it on, the NX809J decoder (Android 16) fails to start and IJK falls back to SOFTWARE decoding (fb1, 2026-11-11: 6 of 6 steps)
     static final boolean DEFAULT_BLOCK_IJK_FRAME_DROP = false;
     static final boolean DEFAULT_BLOCK_COMPUTE_TARGET_DELAY = true;
     static final boolean DEFAULT_FRAME_QUEUE_WAIT_ROUND_UP = false;
@@ -62,13 +58,71 @@ final class ModulePreferences {
     static final boolean DEFAULT_NATIVE_RESOLUTION_OUTPUT = false;
     static final boolean DEFAULT_HDR_AUTO_SURFACE = true;
 
-    static boolean isHdrAutoSurfaceEnabled(Context context) {
-        return preferences(context).getBoolean(KEY_HDR_AUTO_SURFACE, DEFAULT_HDR_AUTO_SURFACE);
+    /** Media3 scheduleMedia3: release when releaseTs-now is within this many ms. */
+    static final String KEY_MEDIA3_READY_WINDOW_MS = "media3_ready_window_ms";
+    static final int DEFAULT_MEDIA3_READY_WINDOW_MS = 33;
+    static final int MIN_MEDIA3_READY_WINDOW_MS = 1;
+    static final int MAX_MEDIA3_READY_WINDOW_MS = 50;
+
+    /** Media3 late-frame skip: skip when more than this many ms behind audio. */
+    static final String KEY_MEDIA3_LATE_DROP_MS = "media3_late_drop_ms";
+    static final int DEFAULT_MEDIA3_LATE_DROP_MS = 30;
+    static final int MIN_MEDIA3_LATE_DROP_MS = 1;
+    static final int MAX_MEDIA3_LATE_DROP_MS = 50;
+
+
+
+    /**
+     * High speeds (user, 2026-11-11: "倍速開關合併 打開就同時解除上限和加入選單"): one switch both lifts the player core's speed ceiling (up to 10x) and
+     * adds the high speeds to the 倍速 menu.  Replaces the two switches lift_speed_cap and speed_menu_extra: while high_speed was never set, those old
+     * values decide (on only if every old one that was set is on).
+     */
+    static final String KEY_HIGH_SPEED = "high_speed";
+    static final boolean DEFAULT_HIGH_SPEED = true;
+    private static final String LIFT_SPEED_CAP_OLD = "lift_speed_cap";
+    private static final String SPEED_MENU_EXTRA_OLD = "speed_menu_extra";
+    static final String KEY_SPEED_CAP_LIMIT = "speed_cap_limit";
+    static final float DEFAULT_SPEED_CAP_LIMIT = SpeedSettings.MAX_RATE;
+    static final String KEY_LONG_PRESS_SPEED = "long_press_speed";
+
+    static boolean loadHighSpeedForHook() {
+        try {
+            SharedPreferences preferences = hookPreferences();
+            if (preferences.contains(KEY_HIGH_SPEED)) {
+                return preferences.getBoolean(KEY_HIGH_SPEED, DEFAULT_HIGH_SPEED);
+            }
+            return preferences.getBoolean(LIFT_SPEED_CAP_OLD, DEFAULT_HIGH_SPEED)
+                    && preferences.getBoolean(SPEED_MENU_EXTRA_OLD, DEFAULT_HIGH_SPEED);
+        } catch (Throwable ignored) {
+            return DEFAULT_HIGH_SPEED;
+        }
     }
 
-    static void setHdrAutoSurfaceEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_HDR_AUTO_SURFACE, enabled));
+    /** Effective native ceiling for the IJK service; 0 means leave Bilibili's own cap alone. */
+    static float loadSpeedCapLimitForHook() {
+        try {
+            return SpeedSettings.effectiveCapLimit(loadHighSpeedForHook(),
+                    hookPreferences().getFloat(KEY_SPEED_CAP_LIMIT, DEFAULT_SPEED_CAP_LIMIT));
+        } catch (Throwable ignored) {
+            return SpeedSettings.effectiveCapLimit(DEFAULT_HIGH_SPEED, DEFAULT_SPEED_CAP_LIMIT);
+        }
+    }
+
+    /** The extra speeds in the 倍速 menu follow the same switch. */
+    static boolean loadSpeedMenuExtraForHook() {
+        return loadHighSpeedForHook();
+    }
+
+    /** NaN unless the user has set a long-press rate: only then does it replace Bilibili's. */
+    static float loadLongPressSpeedOverrideForHook() {
+        try {
+            SharedPreferences preferences = hookPreferences();
+            return SpeedSettings.longPressOverride(preferences.contains(KEY_LONG_PRESS_SPEED),
+                    preferences.getFloat(KEY_LONG_PRESS_SPEED,
+                            SpeedSettings.DEFAULT_LONG_PRESS_RATE));
+        } catch (Throwable ignored) {
+            return Float.NaN;
+        }
     }
 
     static boolean loadHdrAutoSurfaceForHook() {
@@ -77,16 +131,6 @@ final class ModulePreferences {
         } catch (Throwable ignored) {
             return DEFAULT_HDR_AUTO_SURFACE;
         }
-    }
-
-    static boolean isNativeResolutionOutputEnabled(Context context) {
-        return preferences(context).getBoolean(
-                KEY_NATIVE_RESOLUTION_OUTPUT, DEFAULT_NATIVE_RESOLUTION_OUTPUT);
-    }
-
-    static void setNativeResolutionOutputEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_NATIVE_RESOLUTION_OUTPUT, enabled));
     }
 
     static boolean loadNativeResolutionOutputForHook() {
@@ -98,7 +142,34 @@ final class ModulePreferences {
         }
     }
 
-    private static volatile boolean automationProfileLocksRenderer = false;
+
+    static int clampMedia3ReadyWindowMs(int ms) {
+        return Math.max(MIN_MEDIA3_READY_WINDOW_MS, Math.min(MAX_MEDIA3_READY_WINDOW_MS, ms));
+    }
+
+    static int clampMedia3LateDropMs(int ms) {
+        return Math.max(MIN_MEDIA3_LATE_DROP_MS, Math.min(MAX_MEDIA3_LATE_DROP_MS, ms));
+    }
+
+
+    static int loadMedia3ReadyWindowMsForHook() {
+        try {
+            return clampMedia3ReadyWindowMs(hookPreferences().getInt(
+                    KEY_MEDIA3_READY_WINDOW_MS, DEFAULT_MEDIA3_READY_WINDOW_MS));
+        } catch (Throwable ignored) {
+            return DEFAULT_MEDIA3_READY_WINDOW_MS;
+        }
+    }
+
+    static int loadMedia3LateDropMsForHook() {
+        try {
+            return clampMedia3LateDropMs(hookPreferences().getInt(
+                    KEY_MEDIA3_LATE_DROP_MS, DEFAULT_MEDIA3_LATE_DROP_MS));
+        } catch (Throwable ignored) {
+            return DEFAULT_MEDIA3_LATE_DROP_MS;
+        }
+    }
+
 
     private ModulePreferences() {
     }
@@ -126,53 +197,6 @@ final class ModulePreferences {
         }
     }
 
-    static RendererMode getVideoDetailRendererMode(Context context) {
-        return rendererMode(preferences(context));
-    }
-
-    static void setVideoDetailRendererMode(Context context, RendererMode mode) {
-        if (automationProfileLocksRenderer) {
-            return;
-        }
-        commitPreferences(context, preferences(context).edit()
-                .putString(KEY_VIDEO_DETAIL_RENDERER_MODE, mode.name()));
-    }
-
-    static boolean isPlaybackDebugOverlayEnabled(Context context) {
-        return preferences(context).getBoolean(
-                KEY_PLAYBACK_DEBUG_OVERLAY, DEFAULT_PLAYBACK_DEBUG_OVERLAY);
-    }
-
-    static void setPlaybackDebugOverlayEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_PLAYBACK_DEBUG_OVERLAY, enabled));
-    }
-
-    static boolean isPlaybackStreamOverlayEnabled(Context context) {
-        return preferences(context).getBoolean(
-                KEY_PLAYBACK_STREAM_OVERLAY, DEFAULT_PLAYBACK_STREAM_OVERLAY);
-    }
-
-    static void setPlaybackStreamOverlayEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_PLAYBACK_STREAM_OVERLAY, enabled));
-    }
-
-    static boolean isAutoSelectBestAudioEnabled(Context context) {
-        return preferences(context).getBoolean(
-                KEY_AUTO_SELECT_BEST_AUDIO, DEFAULT_AUTO_SELECT_BEST_AUDIO);
-    }
-
-    static int getOverlayTopMarginDp(Context context) {
-        return clampOverlayTopMargin(preferences(context).getInt(
-                KEY_OVERLAY_TOP_MARGIN_DP, DEFAULT_OVERLAY_TOP_MARGIN_DP));
-    }
-
-    static void setOverlayTopMarginDp(Context context, int dp) {
-        commitPreferences(context, preferences(context).edit()
-                .putInt(KEY_OVERLAY_TOP_MARGIN_DP, clampOverlayTopMargin(dp)));
-    }
-
     static int loadOverlayTopMarginDpForHook() {
         try {
             return clampOverlayTopMargin(hookPreferences().getInt(
@@ -192,39 +216,6 @@ final class ModulePreferences {
 
     static String overlayYKey(boolean landscape) {
         return landscape ? KEY_OVERLAY_Y_LAND : KEY_OVERLAY_Y_PORT;
-    }
-
-    /** -1 when never set (centred). */
-    static int getOverlayXDp(Context context, boolean landscape) {
-        int value = preferences(context).getInt(overlayXKey(landscape), OVERLAY_X_UNSET);
-        return value < 0 ? OVERLAY_X_UNSET : Math.min(value, MAX_OVERLAY_POSITION_DP);
-    }
-
-    /** Falls back to the single top margin this setting replaced. */
-    static int getOverlayYDp(Context context, boolean landscape) {
-        return clampPosition(preferences(context).getInt(
-                overlayYKey(landscape), getOverlayTopMarginDp(context)));
-    }
-
-    static int getOverlayTextSizeSp(Context context) {
-        return clampTextSize(preferences(context).getInt(
-                KEY_OVERLAY_TEXT_SIZE_SP, DEFAULT_OVERLAY_TEXT_SIZE_SP));
-    }
-
-    /** Stores one of the overlay position / size settings; false for any other key. */
-    static boolean setOverlayInt(Context context, String key, int value) {
-        int stored;
-        if (KEY_OVERLAY_X_LAND.equals(key) || KEY_OVERLAY_X_PORT.equals(key)) {
-            stored = value < 0 ? OVERLAY_X_UNSET : Math.min(value, MAX_OVERLAY_POSITION_DP);
-        } else if (KEY_OVERLAY_Y_LAND.equals(key) || KEY_OVERLAY_Y_PORT.equals(key)) {
-            stored = clampPosition(value);
-        } else if (KEY_OVERLAY_TEXT_SIZE_SP.equals(key)) {
-            stored = clampTextSize(value);
-        } else {
-            return false;
-        }
-        commitPreferences(context, preferences(context).edit().putInt(key, stored));
-        return true;
     }
 
     static int loadOverlayXDpForHook(boolean landscape) {
@@ -262,16 +253,6 @@ final class ModulePreferences {
         return Math.max(MIN_OVERLAY_TEXT_SIZE_SP, Math.min(MAX_OVERLAY_TEXT_SIZE_SP, sp));
     }
 
-    static boolean isReplaceStoryVideoEnabled(Context context) {
-        return preferences(context).getBoolean(
-                KEY_REPLACE_STORY_VIDEO, DEFAULT_REPLACE_STORY_VIDEO);
-    }
-
-    static void setReplaceStoryVideoEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_REPLACE_STORY_VIDEO, enabled));
-    }
-
     static boolean loadReplaceStoryVideoForHook() {
         try {
             return hookPreferences().getBoolean(
@@ -279,20 +260,6 @@ final class ModulePreferences {
         } catch (Throwable ignored) {
             return DEFAULT_REPLACE_STORY_VIDEO;
         }
-    }
-
-    static void setAutoSelectBestAudioEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_AUTO_SELECT_BEST_AUDIO, enabled));
-    }
-
-    static boolean isMedia3FrameSyncEnabled(Context context) {
-        return preferences(context).getBoolean(KEY_MEDIA3_FRAME_SYNC, DEFAULT_MEDIA3_FRAME_SYNC);
-    }
-
-    static void setMedia3FrameSyncEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_MEDIA3_FRAME_SYNC, enabled));
     }
 
     static RendererMode loadVideoDetailRendererModeForHook() {
@@ -353,41 +320,6 @@ final class ModulePreferences {
         }
     }
 
-    static boolean loadMinimalMedia3PlayerForHook() {
-        try {
-            SharedPreferences preferences = hookPreferences();
-            boolean enabled = preferences.getBoolean(
-                    KEY_MINIMAL_MEDIA3_PLAYER, DEFAULT_MINIMAL_MEDIA3_PLAYER);
-            String source;
-            if (HOOK_VIEW.delegate() instanceof XSharedPreferences) {
-                File preferenceFile = ((XSharedPreferences) HOOK_VIEW.delegate()).getFile();
-                source = " file=" + preferenceFile.getAbsolutePath()
-                        + " readable=" + preferenceFile.canRead()
-                        + " length=" + preferenceFile.length()
-                        + " modified=" + preferenceFile.lastModified();
-            } else {
-                source = " source=provider";
-            }
-            Log.i(TAG, "[DEBUG-PREF-01] minimal_media3_player=" + enabled
-                    + " contains=" + preferences.contains(KEY_MINIMAL_MEDIA3_PLAYER)
-                    + " keys=" + preferences.getAll().keySet() + source);
-            return enabled;
-        } catch (Throwable ignored) {
-            Log.e(TAG, "[DEBUG-PREF-01] minimal_media3_player read failed"
-                    + "=" + ignored.getClass().getSimpleName());
-            return DEFAULT_MINIMAL_MEDIA3_PLAYER;
-        }
-    }
-
-    static boolean isQtiOutputFenceEnabled(Context context) {
-        return preferences(context).getBoolean(KEY_QTI_OUTPUT_FENCE, DEFAULT_QTI_OUTPUT_FENCE);
-    }
-
-    static void setQtiOutputFenceEnabled(Context context, boolean enabled) {
-        commitPreferences(context, preferences(context).edit()
-                .putBoolean(KEY_QTI_OUTPUT_FENCE, enabled));
-    }
-
     static boolean loadQtiOutputFenceForHook() {
         try {
             return hookPreferences().getBoolean(KEY_QTI_OUTPUT_FENCE, DEFAULT_QTI_OUTPUT_FENCE);
@@ -426,342 +358,6 @@ final class ModulePreferences {
         }
     }
 
-    /** Apply a deterministic renderer A/B baseline from the unattended test runner. */
-    static boolean applyAutomationProfile(Context context, String rendererModeValue,
-                                            Boolean renderCadenceProbe,
-                                            Boolean media3FrameSync,
-                                            Boolean frameQueueWaitRoundUp) {
-        return applyAutomationProfile(context, rendererModeValue, renderCadenceProbe,
-                media3FrameSync, frameQueueWaitRoundUp, null, null);
-    }
-
-    /**
-     * The measurement runner's A/B knobs (IJK block switches, frame-queue wait rounding, render
-     * cadence probe) exist only here: they are not user settings.  The block switches default
-     * to the historical A/B baseline (true) when null.
-     */
-    static boolean applyAutomationProfile(Context context, String rendererModeValue,
-                                            Boolean renderCadenceProbe,
-                                            Boolean media3FrameSync,
-                                            Boolean frameQueueWaitRoundUp,
-                                            Boolean blockIjkFrameDrop,
-                                            Boolean blockComputeTargetDelay) {
-        RendererMode mode = RendererMode.fromStoredValue(rendererModeValue);
-        if (mode == null) {
-            return false;
-        }
-        automationProfileLocksRenderer = true;
-        SharedPreferences.Editor editor = preferences(context).edit()
-                .putString(KEY_VIDEO_DETAIL_RENDERER_MODE, mode.name())
-                .putBoolean(KEY_PLAYBACK_DEBUG_OVERLAY, true)
-                .putBoolean(KEY_MEDIA3_FRAME_SYNC,
-                        media3FrameSync != null && media3FrameSync.booleanValue())
-                .putBoolean(KEY_BLOCK_IJK_FRAME_DROP,
-                        blockIjkFrameDrop == null || blockIjkFrameDrop.booleanValue())
-                .putBoolean(KEY_BLOCK_COMPUTE_TARGET_DELAY,
-                        blockComputeTargetDelay == null
-                                || blockComputeTargetDelay.booleanValue())
-                .putBoolean(KEY_FRAME_QUEUE_WAIT_ROUND_UP,
-                        frameQueueWaitRoundUp != null
-                                && frameQueueWaitRoundUp.booleanValue());
-        if (renderCadenceProbe != null) {
-            editor.putBoolean(KEY_RENDER_CADENCE_PROBE, renderCadenceProbe.booleanValue());
-        }
-        return commitPreferences(context, editor);
-    }
-
-    /**
-     * LSPosed's xposedsharedprefs bridge can only refresh module preferences when the source XML
-     * remains readable outside the module process. Android 9+ ignores the legacy
-     * MODE_WORLD_READABLE flag for modern-target applications, so make the committed file
-     * explicitly world-readable after every write.
-     */
-    private static boolean commitPreferences(Context context, SharedPreferences.Editor editor) {
-        if (!editor.commit()) {
-            return false;
-        }
-        return makePreferencesWorldReadable(context);
-    }
-
-    private static boolean makePreferencesWorldReadable(Context context) {
-        try {
-            File preferencesFile = new File(
-                    new File(context.getApplicationInfo().dataDir, "shared_prefs"),
-                    PREFS_NAME + ".xml");
-            return preferencesFile.exists() && preferencesFile.setReadable(true, false);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    // The hooks read preferences several times per video frame on the IJK release thread;
-    // parsing the XML each time cost CPU and garbage in the hot path (GC bursts starved the
-    // pipeline threads).  Reads come from an in-memory view re-checked at most every two seconds.
-    //
-    // One source of truth: the module app's own preferences, read live through its provider.
-    // The copy a framework keeps for XSharedPreferences (LSPosed/Vector sync it only when it
-    // feels like it, so it can be stale) is only the fallback for when the provider cannot be
-    // reached; settings changed inside Bilibili that could not be written to the module app
-    // live in HostOverrideStore (see there).
-    private static final long HOOK_PREFERENCES_TTL_NS = 2_000_000_000L;
-    private static final long PROVIDER_RETRY_NS = 10_000_000_000L;
-    private static XSharedPreferences cachedHookPreferences;
-    private static long cachedHookPreferencesNs;
-    private static volatile SharedPreferences providerSnapshot;
-    private static volatile boolean providerRefreshRunning;
-    private static volatile long providerCheckedNs;
-    private static volatile boolean providerApplicationMissing;
-    private static volatile boolean fallbackLogged;
-
-    private static synchronized SharedPreferences hookPreferences() {
-        long now = System.nanoTime();
-        SharedPreferences snapshot = providerSnapshot;
-        if (snapshot == null) {
-            if (providerCheckedNs == 0 || now - providerCheckedNs > PROVIDER_RETRY_NS) {
-                // Synchronous, so startup hooks see the user's settings. Before the Application
-                // exists nothing was tried, so the next read tries again at once.
-                providerApplicationMissing = false;
-                snapshot = readProviderSnapshot();
-                providerCheckedNs = providerApplicationMissing ? 0 : now;
-                if (snapshot != null) {
-                    providerSnapshot = snapshot;
-                }
-            }
-        } else if (now - providerCheckedNs > HOOK_PREFERENCES_TTL_NS && !providerRefreshRunning) {
-            // Later refreshes stay off the hot path: the provider call may start the module
-            // app's process.
-            providerCheckedNs = now;
-            providerRefreshRunning = true;
-            Thread refresh = new Thread(() -> {
-                try {
-                    SharedPreferences fresh = readProviderSnapshot();
-                    if (fresh != null) {
-                        providerSnapshot = fresh;
-                    }
-                } finally {
-                    providerRefreshRunning = false;
-                }
-            }, "BiliExtended-prefs");
-            refresh.setDaemon(true);
-            refresh.start();
-        }
-        if (snapshot != null) {
-            return HOOK_VIEW.delegateTo(snapshot);
-        }
-        // Provider unreachable: the framework's copy of the file, if this process can read it.
-        boolean stale = cachedHookPreferences == null
-                || now - cachedHookPreferencesNs > HOOK_PREFERENCES_TTL_NS;
-        if (cachedHookPreferences == null) {
-            cachedHookPreferences = new XSharedPreferences(PACKAGE_NAME, PREFS_NAME);
-        }
-        if (stale) {
-            cachedHookPreferences.reload();
-            cachedHookPreferencesNs = now;
-        }
-        if (!fallbackLogged) {
-            fallbackLogged = true;
-            File file = cachedHookPreferences.getFile();
-            Log.i(TAG, "module preferences read from XSharedPreferences file="
-                    + file.getAbsolutePath() + " readable=" + file.canRead());
-        }
-        return HOOK_VIEW.delegateTo(cachedHookPreferences);
-    }
-
-    /** Re-reads the provider now, so a value just written to the module app is what hooks see. */
-    static void refreshProviderSnapshot() {
-        SharedPreferences fresh = readProviderSnapshot();
-        if (fresh != null) {
-            providerSnapshot = fresh;
-            providerCheckedNs = System.nanoTime();
-        }
-    }
-
-    // Values the in-player menu changed, kept by HostOverrideStore: the module app owns the
-    // real preferences and cannot always be reached from Bilibili.
-    private static final OverridePreferences HOOK_VIEW = new OverridePreferences();
-
-    /** Records a change made inside Bilibili; it takes effect in every Bilibili process. */
-    static void setHostOverride(String key, Object value) {
-        hookPreferences();  // makes sure the module's own preferences are known
-        SharedPreferences module = HOOK_VIEW.delegate();
-        if (module == null) {
-            return;
-        }
-        String moduleValue;
-        if (value instanceof Boolean) {
-            // An unset key reads as the opposite of the new value (see OverridePreferences).
-            moduleValue = String.valueOf(module.getBoolean(key, !(Boolean) value));
-        } else if (value instanceof Integer) {
-            moduleValue = String.valueOf(module.getInt(key, Integer.MIN_VALUE));
-        } else {
-            moduleValue = String.valueOf(module.getString(key, ""));
-        }
-        HostOverrideStore.put(key, String.valueOf(value), moduleValue);
-    }
-
-    /** What the hooks read: the override first, everything else from the real preferences. */
-    private static final class OverridePreferences implements SharedPreferences {
-        private volatile SharedPreferences delegate;
-
-        OverridePreferences delegateTo(SharedPreferences base) {
-            delegate = base;
-            return this;
-        }
-
-        SharedPreferences delegate() {
-            return delegate;
-        }
-
-        @Override
-        public boolean getBoolean(String key, boolean defValue) {
-            String[] entry = HostOverrideStore.get(key);
-            if (entry != null && entry[1].equals(String.valueOf(
-                    delegate.getBoolean(key, !Boolean.parseBoolean(entry[0]))))) {
-                return Boolean.parseBoolean(entry[0]);
-            }
-            return delegate.getBoolean(key, defValue);
-        }
-
-        @Override
-        public String getString(String key, String defValue) {
-            String[] entry = HostOverrideStore.get(key);
-            if (entry != null && entry[1].equals(String.valueOf(delegate.getString(key, "")))) {
-                return entry[0];
-            }
-            return delegate.getString(key, defValue);
-        }
-
-        @Override
-        public int getInt(String key, int defValue) {
-            String[] entry = HostOverrideStore.get(key);
-            if (entry != null && entry[1].equals(String.valueOf(
-                    delegate.getInt(key, Integer.MIN_VALUE)))) {
-                try {
-                    return Integer.parseInt(entry[0]);
-                } catch (NumberFormatException ignored) {
-                    // Fall through to the module's value.
-                }
-            }
-            return delegate.getInt(key, defValue);
-        }
-
-        @Override
-        public boolean contains(String key) {
-            return delegate.contains(key);
-        }
-
-        @Override
-        public Map<String, ?> getAll() {
-            return delegate.getAll();
-        }
-
-        @Override
-        public Set<String> getStringSet(String key, Set<String> defValues) {
-            return delegate.getStringSet(key, defValues);
-        }
-
-        @Override
-        public long getLong(String key, long defValue) {
-            return delegate.getLong(key, defValue);
-        }
-
-        @Override
-        public float getFloat(String key, float defValue) {
-            return delegate.getFloat(key, defValue);
-        }
-
-        @Override
-        public Editor edit() {
-            throw new UnsupportedOperationException("read-only module preferences");
-        }
-
-        @Override
-        public void registerOnSharedPreferenceChangeListener(
-                OnSharedPreferenceChangeListener listener) {
-        }
-
-        @Override
-        public void unregisterOnSharedPreferenceChangeListener(
-                OnSharedPreferenceChangeListener listener) {
-        }
-    }
-
-    private static SharedPreferences readProviderSnapshot() {
-        try {
-            Object application = Class.forName("android.app.ActivityThread")
-                    .getMethod("currentApplication").invoke(null);
-            if (!(application instanceof Context)) {
-                providerApplicationMissing = true;
-                return null;
-            }
-            android.os.Bundle bundle = ((Context) application).getContentResolver().call(
-                    ModulePreferencesProvider.URI, ModulePreferencesProvider.METHOD_SNAPSHOT,
-                    null, null);
-            if (bundle == null) {
-                logProviderOnce("module preferences provider returned nothing");
-                return null;
-            }
-            if (!providerLogged) {
-                providerLogged = true;
-                Log.i(TAG, "module preferences read from provider file="
-                        + bundle.getString(SNAPSHOT_SOURCE_KEY) + " keys="
-                        + new java.util.TreeSet<>(bundle.keySet()));
-            }
-            return new SnapshotPreferences(bundle);
-        } catch (Throwable throwable) {
-            logProviderOnce("module preferences provider unavailable="
-                    + throwable.getClass().getSimpleName());
-            return null;
-        }
-    }
-
-    private static volatile boolean providerLogged;
-    private static volatile boolean providerFailureLogged;
-
-    private static void logProviderOnce(String message) {
-        if (!providerFailureLogged) {
-            providerFailureLogged = true;
-            Log.w(TAG, message);
-        }
-    }
-
-    /**
-     * The one file the module app reads and writes. With a framework hooking the module app,
-     * MODE_WORLD_READABLE lives in the framework's own directory, not in shared_prefs/: every
-     * access (UI, provider writes and the provider snapshot) must use this same call.
-     */
-    static SharedPreferences preferences(Context context) {
-        try {
-            return context.getSharedPreferences(PREFS_NAME, Context.MODE_WORLD_READABLE);
-        } catch (SecurityException ignored) {
-            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        }
-    }
-
-    /** Key in the provider snapshot that names the file the module app really reads and writes. */
-    static final String SNAPSHOT_SOURCE_KEY = "_source_file";
-
-    /** Absolute path of the file behind {@link #preferences}, for the log; never guessed. */
-    static String preferencesFilePath(Context context) {
-        SharedPreferences preferences = preferences(context);
-        try {
-            java.lang.reflect.Field field = preferences.getClass().getDeclaredField("mFile");
-            field.setAccessible(true);
-            File file = (File) field.get(preferences);
-            return file.getAbsolutePath() + " (size=" + file.length()
-                    + " modified=" + file.lastModified() + ")";
-        } catch (Throwable ignored) {
-            // Hidden field blocked: fall through to the context's own answer.
-        }
-        try {
-            File file = (File) Context.class.getMethod("getSharedPreferencesPath", String.class)
-                    .invoke(context, PREFS_NAME);
-            return file.getAbsolutePath() + " (not confirmed: framework may redirect it)";
-        } catch (Throwable throwable) {
-            return "unknown (" + throwable.getClass().getSimpleName() + ")";
-        }
-    }
-
     private static RendererMode rendererMode(SharedPreferences preferences) {
         RendererMode stored = RendererMode.fromStoredValue(
                 preferences.getString(KEY_VIDEO_DETAIL_RENDERER_MODE, null));
@@ -769,5 +365,28 @@ final class ModulePreferences {
             return stored;
         }
         return RendererMode.SURFACE_EXTERNAL;
+    }
+
+    /**
+     * Where every setting lives: a file in Bilibili's own data folder (BiliSettings), written by the in-player Bili Extended menu.  The module app
+     * keeps no settings (user, 2026-11-11: settings only in Bilibili, the module stores none).  Why: the module app's copy never reached Bilibili on
+     * the phone -- the provider call failed (package visibility) and the framework copy XSharedPreferences pointed at had no file -- so every
+     * value Bilibili used came from the in-player menu or the program default anyway.
+     */
+    private static SharedPreferences hookPreferences() {
+        return BiliSettings.view();
+    }
+
+    /** Stores a setting changed in the in-player menu; every Bilibili process sees it within a second. */
+    static void set(String key, Object value) {
+        BiliSettings.put(key, String.valueOf(value));
+    }
+
+    static boolean loadMinimalMedia3PlayerForHook() {
+        try {
+            return hookPreferences().getBoolean(KEY_MINIMAL_MEDIA3_PLAYER, DEFAULT_MINIMAL_MEDIA3_PLAYER);
+        } catch (Throwable ignored) {
+            return DEFAULT_MINIMAL_MEDIA3_PLAYER;
+        }
     }
 }

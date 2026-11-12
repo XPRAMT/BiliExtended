@@ -13,9 +13,6 @@ import java.util.WeakHashMap;
 import java.lang.reflect.Field;
 import java.util.concurrent.atomic.AtomicLong;
 
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Trace-only P2 instrumentation for the external-render callback path.
@@ -46,89 +43,89 @@ final class RenderCadenceProbe {
         int installedHooks = 0;
         installedHooks += hook("postFrameCallback", new Object[]{
                 Choreographer.FrameCallback.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapFrameCallback(param, false);
                     }
                 }});
         installedHooks += hook("postFrameCallbackDelayed", new Object[]{
                 Choreographer.FrameCallback.class, long.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapFrameCallback(param, true);
                     }
                 }});
         installedHooks += hook("postVsyncCallback", new Object[]{
                 Choreographer.VsyncCallback.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapVsyncCallback(param);
                     }
                 }});
         installedHooks += hook("postCallback", new Object[]{
                 int.class, Runnable.class, Object.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapRunnable(param, false);
                     }
                 }});
         installedHooks += hook("postCallbackDelayed", new Object[]{
                 int.class, Runnable.class, Object.class, long.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapRunnable(param, true);
                     }
                 }});
         installedHooks += hookHandler("post", new Object[]{
                 Runnable.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapHandlerRunnable(param, 0, "handler_post");
                     }
                 }});
         installedHooks += hookHandler("postDelayed", new Object[]{
                 Runnable.class, long.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapHandlerRunnable(param, 0, "handler_post_delayed");
                     }
                 }});
         installedHooks += hookHandler("postAtFrontOfQueue", new Object[]{
                 Runnable.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapHandlerRunnable(param, 0, "handler_post_front");
                     }
                 }});
         installedHooks += hookHandler("postAtTime", new Object[]{
                 Runnable.class, long.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapHandlerRunnable(param, 0, "handler_post_at_time");
                     }
                 }});
         installedHooks += hookHandler("postAtTime", new Object[]{
                 Runnable.class, Object.class, long.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         wrapHandlerRunnable(param, 0, "handler_post_at_time_token");
                     }
                 }});
         installedHooks += hookHandler("sendMessageAtFrontOfQueue", new Object[]{
                 Message.class,
-                new XC_MethodHook() {
+                new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         if (!isHandoffThread() || !(param.args[0] instanceof Message)) {
                             return;
                         }
@@ -141,9 +138,9 @@ final class RenderCadenceProbe {
                 }});
         try {
             installedHooks += hookDeclaredMethods(MessageQueue.class, "enqueueMessage",
-                    new XC_MethodHook() {
+                    new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (!isHandoffThread()
                                     || param.args.length == 0
                                     || !(param.args[0] instanceof Message)) {
@@ -157,14 +154,14 @@ final class RenderCadenceProbe {
                         }
                     });
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: MessageQueue.enqueueMessage hook unavailable: "
+            Xp.log("BiliExtended: MessageQueue.enqueueMessage hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
             installedHooks += hookDeclaredMethods(Choreographer.class,
-                    "postCallbackDelayedInternal", new XC_MethodHook() {
+                    "postCallbackDelayedInternal", new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (isHandoffThread()) {
                                 tracePoint("choreographer_post_callback_internal",
                                         NEXT_TOKEN.incrementAndGet(), currentDisplayToken());
@@ -172,14 +169,14 @@ final class RenderCadenceProbe {
                         }
                     });
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: Choreographer.postCallbackDelayedInternal hook unavailable: "
+            Xp.log("BiliExtended: Choreographer.postCallbackDelayedInternal hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
             installedHooks += hookDeclaredMethods(Choreographer.class,
-                    "scheduleFrameLocked", new XC_MethodHook() {
+                    "scheduleFrameLocked", new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (isHandoffThread()) {
                                 tracePoint("choreographer_schedule_frame_locked",
                                         NEXT_TOKEN.incrementAndGet(), currentDisplayToken());
@@ -187,7 +184,7 @@ final class RenderCadenceProbe {
                         }
                     });
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: Choreographer.scheduleFrameLocked hook unavailable: "
+            Xp.log("BiliExtended: Choreographer.scheduleFrameLocked hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         installedHooks += hookFrameDisplayEventReceiver();
@@ -201,10 +198,10 @@ final class RenderCadenceProbe {
     private static int hook(String methodName, Object[] parameterTypesAndCallback) {
         try {
             Object[] arguments = parameterTypesAndCallback.clone();
-            XC_MethodHook callback = (XC_MethodHook) arguments[arguments.length - 1];
+            Xp.Hook callback = (Xp.Hook) arguments[arguments.length - 1];
             Object[] parameterTypes = new Object[arguments.length - 1];
             System.arraycopy(arguments, 0, parameterTypes, 0, parameterTypes.length);
-            XposedHelpers.findAndHookMethod(Choreographer.class, methodName,
+            Xp.findAndHookMethod(Choreographer.class, methodName,
                     appendCallback(parameterTypes, callback));
             return 1;
         } catch (Throwable ignored) {
@@ -215,10 +212,10 @@ final class RenderCadenceProbe {
     private static int hookHandler(String methodName, Object[] parameterTypesAndCallback) {
         try {
             Object[] arguments = parameterTypesAndCallback.clone();
-            XC_MethodHook callback = (XC_MethodHook) arguments[arguments.length - 1];
+            Xp.Hook callback = (Xp.Hook) arguments[arguments.length - 1];
             Object[] parameterTypes = new Object[arguments.length - 1];
             System.arraycopy(arguments, 0, parameterTypes, 0, parameterTypes.length);
-            XposedHelpers.findAndHookMethod(Handler.class, methodName,
+            Xp.findAndHookMethod(Handler.class, methodName,
                     appendCallback(parameterTypes, callback));
             return 1;
         } catch (Throwable ignored) {
@@ -234,23 +231,23 @@ final class RenderCadenceProbe {
     private static int hookFrameDisplayEventReceiver() {
         Class<?> receiverClass;
         try {
-            receiverClass = XposedHelpers.findClass(
+            receiverClass = Xp.findClass(
                     "android.view.Choreographer$FrameDisplayEventReceiver",
                     ClassLoader.getSystemClassLoader());
         } catch (Throwable systemLoaderFailure) {
             try {
-                receiverClass = XposedHelpers.findClass(
+                receiverClass = Xp.findClass(
                         "android.view.Choreographer$FrameDisplayEventReceiver", null);
             } catch (Throwable bootLoaderFailure) {
-                XposedBridge.log("BiliExtended: FrameDisplayEventReceiver class unavailable: "
+                Xp.log("BiliExtended: FrameDisplayEventReceiver class unavailable: "
                         + bootLoaderFailure.getClass().getSimpleName());
                 return 0;
             }
         }
         int hooks = 0;
-        XC_MethodHook onVsyncHook = new XC_MethodHook() {
+        Xp.Hook onVsyncHook = new Xp.Hook() {
             @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
+            protected void before(Xp.Param param) {
                 int frame = param.args.length > 2 && param.args[2] instanceof Integer
                         ? ((Integer) param.args[2]).intValue()
                         : -1;
@@ -258,9 +255,9 @@ final class RenderCadenceProbe {
                         NEXT_TOKEN.incrementAndGet(), currentDisplayToken());
             }
         };
-        XC_MethodHook dispatchVsyncHook = new XC_MethodHook() {
+        Xp.Hook dispatchVsyncHook = new Xp.Hook() {
             @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
+            protected void before(Xp.Param param) {
                 long timestampNanos = param.args.length > 0 && param.args[0] instanceof Long
                         ? ((Long) param.args[0]).longValue()
                         : -1L;
@@ -272,43 +269,43 @@ final class RenderCadenceProbe {
             }
         };
         try {
-            XposedHelpers.findAndHookMethod(receiverClass, "onVsync",
+            Xp.findAndHookMethod(receiverClass, "onVsync",
                     long.class, int.class, int.class,
                     onVsyncHook);
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: FrameDisplayEventReceiver.onVsync hook unavailable: "
+            Xp.log("BiliExtended: FrameDisplayEventReceiver.onVsync hook unavailable: "
                     + throwable.getClass().getSimpleName());
             try {
-                Class<?> displayReceiverClass = XposedHelpers.findClass(
+                Class<?> displayReceiverClass = Xp.findClass(
                         "android.view.DisplayEventReceiver", null);
                 int fallbackHooks = hookAllOnVsyncMethods(displayReceiverClass, onVsyncHook);
                 hooks += fallbackHooks;
                 if (fallbackHooks == 0) {
-                    XposedBridge.log("BiliExtended: DisplayEventReceiver has no reflected onVsync method");
+                    Xp.log("BiliExtended: DisplayEventReceiver has no reflected onVsync method");
                 }
             } catch (Throwable fallbackThrowable) {
-                XposedBridge.log("BiliExtended: DisplayEventReceiver.onVsync hook unavailable: "
+                Xp.log("BiliExtended: DisplayEventReceiver.onVsync hook unavailable: "
                         + fallbackThrowable.getClass().getSimpleName());
             }
         }
         try {
-            Class<?> displayReceiverClass = XposedHelpers.findClass(
+            Class<?> displayReceiverClass = Xp.findClass(
                     "android.view.DisplayEventReceiver", null);
             int dispatchHooks = hookDeclaredMethods(
                     displayReceiverClass, "dispatchVsync", dispatchVsyncHook);
             hooks += dispatchHooks;
             if (dispatchHooks == 0) {
-                XposedBridge.log("BiliExtended: DisplayEventReceiver has no declared dispatchVsync method");
+                Xp.log("BiliExtended: DisplayEventReceiver has no declared dispatchVsync method");
             }
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: DisplayEventReceiver.dispatchVsync hook unavailable: "
+            Xp.log("BiliExtended: DisplayEventReceiver.dispatchVsync hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
-            XposedHelpers.findAndHookMethod(receiverClass, "run", new XC_MethodHook() {
+            Xp.findAndHookMethod(receiverClass, "run", new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     if (isRenderThread()) {
                         tracePoint("frame_receiver_run",
                                 NEXT_TOKEN.incrementAndGet(), currentDisplayToken());
@@ -317,7 +314,7 @@ final class RenderCadenceProbe {
             });
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: FrameDisplayEventReceiver.run hook unavailable: "
+            Xp.log("BiliExtended: FrameDisplayEventReceiver.run hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         return hooks;
@@ -331,10 +328,10 @@ final class RenderCadenceProbe {
     private static int hookSurfaceTexture() {
         int hooks = 0;
         try {
-            XposedHelpers.findAndHookMethod(SurfaceTexture.class, "updateTexImage",
-                    new XC_MethodHook() {
+            Xp.findAndHookMethod(SurfaceTexture.class, "updateTexImage",
+                    new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (!isHandoffThread() || !(param.thisObject instanceof SurfaceTexture)) {
                                 return;
                             }
@@ -343,7 +340,7 @@ final class RenderCadenceProbe {
                         }
 
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             if (isHandoffThread() && param.thisObject instanceof SurfaceTexture) {
                                 try {
                                     SurfaceTexture surfaceTexture = (SurfaceTexture) param.thisObject;
@@ -362,16 +359,16 @@ final class RenderCadenceProbe {
                     });
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: SurfaceTexture.updateTexImage hook unavailable: "
+            Xp.log("BiliExtended: SurfaceTexture.updateTexImage hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
-            Class<?> listenerClass = XposedHelpers.findClass(
+            Class<?> listenerClass = Xp.findClass(
                     "android.graphics.SurfaceTexture$1", null);
-            XposedHelpers.findAndHookMethod(listenerClass, "handleMessage", Message.class,
-                    new XC_MethodHook() {
+            Xp.findAndHookMethod(listenerClass, "handleMessage", Message.class,
+                    new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (!isHandoffThread()) {
                                 return;
                             }
@@ -386,7 +383,7 @@ final class RenderCadenceProbe {
                     });
             hooks++;
         } catch (Throwable throwable) {
-            XposedBridge.log("BiliExtended: SurfaceTexture listener hook unavailable: "
+            Xp.log("BiliExtended: SurfaceTexture listener hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         return hooks;
@@ -422,26 +419,26 @@ final class RenderCadenceProbe {
         }
     }
 
-    private static int hookAllOnVsyncMethods(Class<?> receiverClass, XC_MethodHook hook)
+    private static int hookAllOnVsyncMethods(Class<?> receiverClass, Xp.Hook hook)
             throws Throwable {
         return hookDeclaredMethods(receiverClass, "onVsync", hook);
     }
 
     private static int hookDeclaredMethods(Class<?> receiverClass, String methodName,
-                                            XC_MethodHook hook) throws Throwable {
+                                            Xp.Hook hook) throws Throwable {
         int hooks = 0;
         java.lang.reflect.Method[] methods = receiverClass.getDeclaredMethods();
         for (java.lang.reflect.Method method : methods) {
             if (!methodName.equals(method.getName())) {
                 continue;
             }
-            XposedBridge.hookMethod(method, hook);
+            Xp.hookMethod(method, hook);
             hooks++;
         }
         return hooks;
     }
 
-    private static Object[] appendCallback(Object[] parameterTypes, XC_MethodHook callback) {
+    private static Object[] appendCallback(Object[] parameterTypes, Xp.Hook callback) {
         Object[] arguments = new Object[parameterTypes.length + 1];
         System.arraycopy(parameterTypes, 0, arguments, 0, parameterTypes.length);
         arguments[arguments.length - 1] = callback;
@@ -460,7 +457,7 @@ final class RenderCadenceProbe {
                 || name.startsWith("binder:");
     }
 
-    private static void wrapFrameCallback(XC_MethodHook.MethodHookParam param, boolean delayed) {
+    private static void wrapFrameCallback(Xp.Param param, boolean delayed) {
         if (!isHandoffThread()) {
             return;
         }
@@ -477,7 +474,7 @@ final class RenderCadenceProbe {
         tracePoint(delayed ? "post_frame_delayed" : "post_frame", token, displayToken);
     }
 
-    private static void wrapVsyncCallback(XC_MethodHook.MethodHookParam param) {
+    private static void wrapVsyncCallback(Xp.Param param) {
         if (!isHandoffThread()) {
             return;
         }
@@ -493,7 +490,7 @@ final class RenderCadenceProbe {
         tracePoint("post_vsync", token, displayToken);
     }
 
-    private static void wrapRunnable(XC_MethodHook.MethodHookParam param, boolean delayed) {
+    private static void wrapRunnable(Xp.Param param, boolean delayed) {
         if (!isHandoffThread()) {
             return;
         }
@@ -508,7 +505,7 @@ final class RenderCadenceProbe {
         tracePoint(delayed ? "post_runnable_delayed" : "post_runnable", token, displayToken);
     }
 
-    private static void wrapHandlerRunnable(XC_MethodHook.MethodHookParam param,
+    private static void wrapHandlerRunnable(Xp.Param param,
                                              int argumentIndex, String event) {
         if (!isHandoffThread()) {
             return;

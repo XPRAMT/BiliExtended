@@ -10,6 +10,7 @@
 #include <jni.h>
 #include <link.h>
 #include <sys/mman.h>
+#include <sys/system_properties.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <sys/resource.h>
@@ -18,6 +19,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include "handoff_gate.h"
+#include "cadence_lock.h"
+#include "got_registry.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -137,6 +141,8 @@ size_t gRawSampleCount = 0;
 size_t gIjkEarlyUsStart = 0;
 size_t gIjkEarlyUsCount = 0;
 std::atomic<bool> gRawSampleWriterStarted = false;
+std::string gRawSamplePath;                    // set once at startup, read by the starter
+std::atomic<bool> gRawSampleStarting = false;
 std::atomic<bool> gIjkSignatureGotOnlyProfile = false;
 std::atomic<uint64_t> gSuccessfulEglSwaps = 0;
 std::atomic<bool> gProducerSamplerStarted = false;
@@ -259,6 +265,7 @@ constexpr uint64_t kScheduleSlotSlackPercent = 50;      // a call up to 0.5p lat
 constexpr uint64_t kScheduleSlackMarginNanos = 1'000'000ULL;
 constexpr uint64_t kScheduleGridMaxAgeNanos = 2'000'000'000ULL;
 constexpr uint64_t kScheduleResyncNanos = 100'000'000ULL;  // IJK AV_SYNC_THRESHOLD_MAX
+constexpr uint64_t kLivelockGuardNanos = 30'000'000ULL;     // a due frame that was not displayed for this long is stuck on a wrong frame_timer mirror
 constexpr uint64_t kScheduleMinPeriodNanos = 4'000'000ULL;
 constexpr uint64_t kScheduleMaxPeriodNanos = 34'000'000ULL;
 std::atomic<bool> gReleaseScheduling = false;
@@ -273,6 +280,10 @@ std::atomic<bool> gPlaybackRateUnity = true;
 std::atomic<double> gPlaybackRate = 1.0;
 std::atomic<bool> gRateScheduling = false;   // last off-1x frame was scheduled
 std::atomic<uint64_t> gScheduleRateScaled = 0;
+// Ideal-timeline step: whether the uniform (estimator) average was used or the raw per-frame delay had to be kept (see scheduleMedia3).
+std::atomic<uint64_t> gIdealStepFromAvg = 0;
+std::atomic<uint64_t> gIdealStepRejected = 0;
+std::atomic<uint64_t> gLastIdealStepNs = 0;
 // Content faster than the panel (120 fps at 2x = 240 frames/s): Media3 renders a frame only if
 // its release time falls on a new VSync and skips the rest (releaseOutputBuffer(false)), which
 // keeps exactly one frame per VSync at an even content step.  Handing that case to IJK left
@@ -284,6 +295,7 @@ std::atomic<uint64_t> gMedia3Skipped = 0;
 std::atomic<uint64_t> gScheduleRateBypassed = 0;
 std::atomic<uint64_t> gGridAnchorNanos = 0;
 std::atomic<uint64_t> gGridPeriodNanos = 0;
+std::atomic<bool> gGridRaceFix{true};   // 223: a grid / note newer than `now` is fresh; debug.biliextended.gridrace=0 restores the old test (A/B only)
 std::atomic<uint64_t> gGridUpdatedNanos = 0;
 // The app-phase VSync timestamp (Choreographer frameTimeNanos) matching gGridAnchorNanos.
 // The external renderers consume frames relative to this VSync (GL redraw on the app VSync,
@@ -650,6 +662,7 @@ std::atomic<uint64_t> gScheduleSlotShifts = 0;
 std::atomic<uint64_t> gScheduleReplacements = 0;
 std::atomic<uint64_t> gScheduleLateFrames = 0;
 std::atomic<uint64_t> gScheduleResyncs = 0;
+std::atomic<uint64_t> gLivelockBreaks = 0;
 std::atomic<uint64_t> gScheduleClamps = 0;
 // Bilibili's compute_target_delay() corrects A/V drift at a threshold of only a few
 // milliseconds (it doubled the delay for 24% of frames when video led by <8 ms), which is
@@ -805,11 +818,52 @@ struct Media3FrameRateEstimator {
 // VideoFrameReleaseHelper / VideoFrameReleaseControl / MediaCodecVideoRenderer constants.
 constexpr int64_t kMedia3MaxAllowedAdjustmentNanos = 20'000'000;   // adjustReleaseTime
 constexpr uint64_t kMedia3VsyncOffsetPercent = 80;                  // releaseTime = vsync - 80 %
+// Experiment (2026-11-11): `debug.biliextended.vsync_off_pct <0..150>` overrides the 80 %.  On the Xiaomi Pad the stamps sit ~0.3 ms from the point where SurfaceFlinger
+// would present a frame one VSync early (drop + hold pair); moving the stamp phase tests that.  Default stays 80.
+std::atomic<uint64_t> gMedia3VsyncOffsetPercent{kMedia3VsyncOffsetPercent};
 constexpr int64_t kMedia3MaxEarlyNanos = 50'000'000;                // release at most 50 ms early
-// Media3 polls every 10 ms and releases the first time earlyUs <= 50 ms, so a frame leaves
-// 40-50 ms before its release timestamp; IJK wakes exactly when told, so aim at the middle.
-constexpr int64_t kMedia3ReleaseLeadNanos = 45'000'000;
+// Compile-time defaults for scheduleMedia3 ready / late-drop. Live values come from
+// Java prefs via nativeSetMedia3*Ms atomics below (in-player sliders).
 constexpr int64_t kMedia3LateDropNanos = 30'000'000;                // MIN_EARLY_US_LATE_THRESHOLD
+std::atomic<uint64_t> gMedia3ReadyWindowNanos{33'000'000};          // default ready window 33 ms
+std::atomic<int64_t> gMedia3LateDropThresholdNanos{kMedia3LateDropNanos};
+// Handoff gate (交出幀門檻): pace handoffs from measured P and estimator D (see scheduleMedia3).  Always on since module 213 (user 2026-11-11: the UI switch is gone,
+// "這些保護功能都永遠開啟"); never invents 8.3 ms.
+std::atomic<uint64_t> gMedia3HandoffGateHolds{0};      // early frames held until lastHandoff + pace - 1 ms
+std::atomic<uint64_t> gMedia3HandoffGateSkips{0};      // literal mode only: early frames of denser content skipped
+std::atomic<uint64_t> gMedia3HandoffTakeSkips{0};      // nativeTakeReleaseTimestamp wall-clock guard fired
+// `debug.biliextended.handoff` = "skip": the literal reading of the rule (an early frame of denser
+// content is skipped when it arrives < P-1 ms after the last handoff).  Unset: it is held until then
+// (default; see handoff_gate.h and the review of 2026-11-06).  Re-read every 2 s with the exp property.
+std::atomic<bool> gHandoffDenseSkip{false};
+// Phase-locked cadence (cadence_lock.h, user priority 2026-11-07).  ON by default since 2026-11-11; `debug.biliextended.cadence` = "0" turns it off.
+// It was written and verified on the phone on 2026-11-07 (120 fps x 2.0: parity flips 0 against 28-36 without it) but stayed off "until the A/B is done" and was then forgotten: on
+// 2026-11-11 the steady-state parity flips of 4K60 x 4 (6-8 per 8.4 s, exactly the beat between the 120.4 Hz panel and 240 frames/s) were investigated from scratch before anyone
+// tried the switch (user: "a feature developed earlier was never enabled, and the same pit was stepped into again").  Phone, 4K60 x 4, module 196: flips 0 in 6 of 6 rounds with the
+// lock (2-4 one-slot holds per 8.4 s instead), 7 and 8 in the 2 rounds without it.
+std::atomic<bool> gCadenceLockEnabled{true};
+// A frame that is still too early is checked again at the EXACT moment it enters the ready window (release time - window); there is no fixed detection interval
+// any more (user, 2026-11-11: "可以不要寫死數值 而是在精確的時間執行嗎 因為上屏時間都是固定已知的", then "精確時間方案 作為唯一方法 移除UI上手動設定的功能").
+// Measured before the fixed interval was removed (te1/te1s, phone, UFO 4K120, 4 rounds each): 0.5x exact 4/4 passed vs fixed 2 ms 2/4, 1.0x 4/4 vs 3/4;
+// ijk_ff_vout wakeups ~393 -> ~290/s.
+// Phase lock of the handoff to the main process's app VSync (2026-11-09; measured on the tablet, 120 fps at 1x: total loss 8.2 % -> 4.4 %, slots_ok 85 -> 92 %). On by default; `debug.biliextended.phase` = 0 turns it off.
+std::atomic<bool> gPhaseLockEnabled{true};
+std::atomic<uint64_t> gPhaseLockHolds{0};
+std::atomic<uint64_t> gPhaseLockReanchors{0};
+// MediaCodec.releaseOutputBuffer duration as seen by the IJK refresh thread, ms buckets: <0.5, <1, <2, <4, <8, more (+ the sum for the mean).
+std::atomic<uint64_t> gRelCall[6];
+std::atomic<uint64_t> gRelCallSumNs{0};
+// How late the handoff really was against its planned slot, counted once per frame at the moment it is released (buckets, ms): <0.2, <1, <2, <4.17(half a period), <8.3, <16.7, more.
+std::atomic<uint64_t> gPhaseLate[7];
+std::atomic<uint64_t> gPhaseSlotsAdvanced[4];     // planned slots between two consecutive handoffs: 1 = on grid, 2 = one empty slot (a repeat on screen), 3, 4+
+std::atomic<uint64_t> gCadLocked{0}, gCadKept{0}, gCadSkipped{0}, gCadRepeats{0}, gCadSkipSlots{0}, gCadRelocks{0};
+std::atomic<uint64_t> gCadRelockStale{0}, gCadRelockInactive{0}, gCadRelockFar{0}, gCadRelockAudio{0};
+std::atomic<uint64_t> gCadNoneUnsynced{0}, gCadNoneClassify{0}, gCadModeHeld{0};
+std::atomic<int64_t> gCadLastRhoMilli{0};
+// Handoff gate band / early allowance (1 ms): classify D vs P and shave this much off the
+// chosen pacing interval. Never invent a panel rate or content rate.
+constexpr int64_t kMedia3HandoffMatchBandNanos = 1'000'000LL;
+constexpr uint64_t kMedia3HandoffEarlyAllowanceNanos = 1'000'000ULL;
 constexpr uint64_t kMedia3MinDelayNanos = 1'000;                    // see scheduleMedia3()
 std::atomic<uint64_t> gMedia3StuckReanchors = 0;
 std::atomic<uint64_t> gMedia3SkipDecisions = 0;     // committed frames scheduled as skip
@@ -835,8 +889,52 @@ std::atomic<uint64_t> gMedia3Adjusted = 0;
 std::atomic<uint64_t> gMedia3AdjustmentResets = 0;
 std::atomic<uint64_t> gMedia3SameVsync = 0;
 std::atomic<uint64_t> gMedia3LateReleases = 0;
+std::atomic<uint64_t> gMedia3EarlyWaits = 0;   // evaluations that found the frame still before its ready window (each one is an IJK wake-up)
 std::atomic<uint64_t> gMedia3Timestamped = 0;
 std::atomic<uint64_t> gMedia3FrameDurationNs = 0;
+
+// Audio clock, pushed from Java with every IJK getCurrentPosition() sample.  Media3 derives every
+// release time from the current audio position (VideoFrameReleaseControl.calculateEarlyTimeUs):
+//   earlyUs = (framePresentationTimeUs - positionUs) / playbackSpeed
+// The position is extrapolated from the last sample at the audio speed (AudioTrackPositionTracker
+// does the same between getTimestamp() updates); the speed is the one the clock really runs at.
+std::atomic<int64_t> gAudioPosNs = 0;
+std::atomic<uint64_t> gAudioSampleNs = 0;   // CLOCK_MONOTONIC time of the sample, 0 = none
+std::atomic<double> gAudioSpeed = 1.0;
+constexpr uint64_t kAudioClockMaxAgeNanos = 400'000'000;
+// Highest speed the audio clock may run at (the speed menu goes up to 10x; was 4.0).
+constexpr double kMaxAudioSpeed = 10.5;
+// Frames later than this are dropped by IJK's own logic (a seek or a long stall), not here.
+constexpr int64_t kMedia3VeryLateNanos = 500'000'000;                // MediaCodecVideoRenderer
+// Constant between the audio position and what is on the panel for a frame released on time
+// (display pipeline); the position itself already compensates the audio output latency.
+constexpr int64_t kAudioDisplayLatencyNanos = 0;
+constexpr bool kAudioLateNoIjkDrop = true;   // A/B: late frames never unsuppress IJK's drop
+// Decode-stage drop decisions (the slot is IJK's
+// is_need_drop_frame, run after the decoder output and before the frame is queued, so a dropped
+// frame never reaches the Java release hook).  Judged against the audio, with the lateness of the
+// frames the refresh thread is showing (the queue between the two keeps their lateness equal):
+//   lateness below the threshold            -> drop (droppedBufferCount); ffplay's threshold is 0
+//   earlyUs < -500 ms  (Media3 isBufferVeryLate) -> IJK's own decision (droppedToKeyframeCount)
+//   late and nothing shown for 100 ms       (Media3 shouldForceRenderOutputBuffer) -> let one through
+// The consecutive drops are also capped (kMaxConsecutiveDrops) so a long run never freezes the video.
+constexpr uint64_t kForceRenderAfterNanos = 100'000'000;
+constexpr int kMaxConsecutiveDrops = 3;
+std::atomic<uint64_t> gDroppedBuffers = 0;           // DecoderCounters.droppedBufferCount
+std::atomic<uint64_t> gDroppedToKeyframe = 0;        // droppedToKeyframeCount
+std::atomic<uint64_t> gForcedRenders = 0;
+std::atomic<int> gMaxConsecutiveDrops = 0;           // maxConsecutiveDroppedBufferCount (reset on read)
+// Validity of the position samples (AudioTrackPositionTracker): age when used, gaps, jumps.
+std::atomic<uint64_t> gSampleAgeBuckets[7] = {};     // <20, 20-40, 40-60, 60-90, 90-150, 150-400, >400 ms
+std::atomic<uint64_t> gSampleAgeMaxNs = 0;
+std::atomic<uint64_t> gSampleGapBuckets[5] = {};     // <40, 40-80, 80-120, 120-200, >200 ms
+std::atomic<uint64_t> gSampleJumps = 0;              // position moved by more than 400 ms against the line
+std::atomic<uint64_t> gSampleStale = 0;              // too old to use (> kAudioClockMaxAgeNanos)   // see scheduleMedia3(): release(false) drops stall IJK
+std::atomic<int64_t> gEarlySumNs = 0;      // audioEarlyNs of the frames scheduled in this second
+std::atomic<uint64_t> gEarlyCount = 0;
+std::atomic<int64_t> gEarlyMinNs = INT64_MAX;
+std::atomic<uint64_t> gMedia3AudioScheduled = 0;   // frames whose release time came from the audio
+std::atomic<uint64_t> gMedia3AudioDrops = 0;       // dropped: earlyUs < -30 ms
 
 struct SchedulerState {
     std::atomic<void*> player = nullptr;   // ffp pointer seen by both IJK hooks
@@ -844,6 +942,8 @@ struct SchedulerState {
     std::atomic<uint64_t> lastUsedNanos = 0;
     std::atomic<bool> frameTimerValid = false;
     std::atomic<uint64_t> frameTimerEstNanos = 0;
+    // First evaluation (since the last display) that returned a positive delay for a frame that was already due; see the livelock guard in scheduleMedia3.
+    std::atomic<uint64_t> dueNoDisplaySinceNs = 0;
     std::atomic<uint64_t> lastReturnedDelayNanos = 0;
     std::atomic<uint64_t> lastTargetTickNanos = 0;
     std::atomic<uint64_t> pendingTargetTickNanos = 0;
@@ -859,6 +959,10 @@ struct SchedulerState {
     int64_t media3LastAdjustedReleaseNs = 0;   // VideoFrameReleaseHelper.lastAdjustedReleaseTimeNs
     bool media3HaveLastAdjusted = false;
     uint64_t media3LastReleaseTsNs = 0;        // previous release timestamp (same-vsync check)
+    uint64_t phaseLastSlotNs = 0;              // planned handoff slot (phase lock) of the last frame that was actually handed off
+    uint64_t phasePendingSlotNs = 0;           // slot planned for the frame being scheduled
+    uint64_t phaseCountedSlotNs = 0;           // the slot whose lateness was already counted (a frame is evaluated several times)
+    uint64_t media3LastShownNs = 0;            // wall time of the last frame that was NOT skipped (late-frame skip: force render after 100 ms)
     bool media3PendingValid = false;
     bool media3PendingResync = false;
     uint64_t media3PendingIdealNs = 0;
@@ -866,13 +970,33 @@ struct SchedulerState {
     uint64_t media3PendingTsNs = 0;
     bool media3PendingIsSkip = false;
     uint64_t media3PendingStampNs = 0;   // releaseTs + lead-lock offset (what SF receives)
+    // per-frame diagnosis (bsbG, written by commitMedia3Frame): why this frame got the slot it got
+    int64_t diagFrameDurUs = 0, diagIdealRelUs = 0, diagAdjSnapUs = 0, diagCandDiffUs = 0, diagStepUs = 0, diagSnapRelUs = 0;
+    uint32_t diagFlags = 0;
     // Whole periods added to every release timestamp when frames cannot be released ahead of
     // them (decoder-bound, e.g. 4K120 at 2x = 240 decodes/s): see commitMedia3Frame().
     int64_t media3LatencyOffsetNs = 0;   // signed: the lock moves both ways
     int media3LateStreak = 0;
+    uint64_t tlmLastScheduleNowNs = 0;         // E2 telemetry: time of the latest scheduleMedia3 call (the IJK wake-up that ends in the release)
+    uint64_t tlmPendingCallTimeNs = 0;         // E2 telemetry: the call time planned for the pending frame (releaseTs - 45 ms, or "now")
     int media3FramesSinceResync = 0;   // catch-up after a (re)sync is late by design
     int media3BehindStreak = 0;
+    std::atomic<uint64_t> lastComputeCallNanos = 0;
+    std::atomic<int64_t> lastAudioEarlyNs = INT64_MAX;   // lateness of the frame being shown, INT64_MAX = unknown
+    std::atomic<uint64_t> lastDisplayNanos = 0;
+    int consecutiveDrops = 0;                            // decode thread only
     uint64_t media3PendingBaseDelayNs = 0;
+    int64_t media3PendingDisplayDurationNs = 0;  // speed-scaled D at schedule (takeRelease denser check)
+    cadence_lock::State cad;                     // phase-locked cadence (scheduler thread only)
+    cadence_lock::Decision cadPendingDecision;
+    cadence_lock::Mode cadPendingMode;
+    cadence_lock::Mode cadLastMode;               // last whole-number mode the classifier returned (held through short estimator / classifier flicker)
+    int64_t cadLastModeNs = 0;
+    int64_t cadLastContentNs = 0;                 // last known content frame duration
+    cadence_lock::Params cadPendingParams;
+    int64_t cadPendingIdealNs = 0;
+    bool cadPendingUsable = false;
+    std::atomic<int64_t> lastDisplayedPtsNs = INT64_MIN;   // PTS of the frame released last
     std::atomic<bool> media3ResetRequested = true;
     std::atomic<uint64_t> media3PendingReleaseTsNs = 0;   // taken by the Java release hook
     std::atomic<bool> media3PendingSkip = false;          // release without rendering
@@ -939,10 +1063,15 @@ SchedulerState* schedForCurrentThread() {
     return nullptr;
 }
 
+// Decoded-frame backlog signal for the late-frame skip (see lateFrameSkipEnabled): EMA of the time a frame waits between dequeueOutputBuffer and its release, fed by Java.
+std::atomic<double> gDecodeWaitEmaNs{0.0};
+std::atomic<uint64_t> gDecodeWaitAtNs{0};      // 0 = no data (after a reset)
+
 void resetAllSchedulers() {
     for (SchedulerState& state : gSchedulers) {
         state.reset();
     }
+    gDecodeWaitAtNs.store(0, std::memory_order_release);
 }
 
 std::atomic<uint64_t> gScheduleDelayCapped = 0;
@@ -1013,6 +1142,232 @@ std::atomic<MediaCodecReleaseOutputBuffer> gOriginalMediaCodecReleaseOutputBuffe
 
 using EglSwapBuffers = EGLBoolean (*)(EGLDisplay, EGLSurface);
 std::atomic<EglSwapBuffers> gOriginalEglSwapBuffers = nullptr;
+
+// Hidden diagnostics switch: adb shell setprop debug.biliextended.log 1 (see DebugLog.java).
+// The property is re-read at most every two seconds.
+bool debugLogEnabled(uint64_t now) {
+    static std::atomic<uint64_t> checkedAt{0};
+    static std::atomic<bool> enabled{false};
+    const uint64_t last = checkedAt.load(std::memory_order_relaxed);
+    if (last == 0 || now - last >= 2'000'000'000ULL) {
+        checkedAt.store(now, std::memory_order_relaxed);
+        char value[PROP_VALUE_MAX] = {0};
+        const int length = __system_property_get("debug.biliextended.log", value);
+        enabled.store(length > 0 && value[0] == '1', std::memory_order_relaxed);
+    }
+    return enabled.load(std::memory_order_relaxed);
+}
+
+// Test-only monitoring (user, 2026-11-11: "all monitoring off by default"): the per-frame trace slices bsbG / bsbS / bsbV are formatted with snprintf on every frame,
+// so they only run while debug.biliextended.stat or .log is 1 (the same switch the Java side uses, DebugLog.monitor()).  Re-read at most every two seconds.
+bool monitorEnabled(uint64_t now) {
+    static std::atomic<uint64_t> checkedAt{0};
+    static std::atomic<bool> on{false};
+    const uint64_t last = checkedAt.load(std::memory_order_relaxed);
+    if (last == 0 || now - last >= 2'000'000'000ULL) {
+        checkedAt.store(now, std::memory_order_relaxed);
+        char stat[PROP_VALUE_MAX] = {0};
+        char log[PROP_VALUE_MAX] = {0};
+        const int statLength = __system_property_get("debug.biliextended.stat", stat);
+        const int logLength = __system_property_get("debug.biliextended.log", log);
+        on.store((statLength > 0 && stat[0] == '1') || (logLength > 0 && log[0] == '1'), std::memory_order_relaxed);
+    }
+    return on.load(std::memory_order_relaxed);
+}
+
+// Decode-stage drop policy (A/B switch, `adb shell setprop debug.biliextended.drop <n>`):
+//   0  upstream: IJK's is_need_drop_frame runs as shipped (its audio clock, diff < 0, its own
+//      consecutive-drop limit); nothing of ours in the way
+//   1  our audio timeline, ffplay's threshold (0): a frame already late when decoded is dropped,
+//      at most kMaxConsecutiveDrops in a row, one let through after kForceRenderAfterNanos
+//   2  as 1 with Media3's -30 ms (mixes the two designs; only for comparison)
+//   3  never drop while the audio timeline runs (IJK's own drop is suppressed; the behaviour of the
+//      commits before this switch existed)
+// Unset = 3.
+int dropMode(uint64_t now) {
+    static std::atomic<uint64_t> checkedAt{0};
+    static std::atomic<int> mode{1};
+    const uint64_t last = checkedAt.load(std::memory_order_relaxed);
+    if (last == 0 || now - last >= 2'000'000'000ULL) {
+        checkedAt.store(now, std::memory_order_relaxed);
+        char value[PROP_VALUE_MAX] = {0};
+        const int length = __system_property_get("debug.biliextended.drop", value);
+        mode.store(length > 0 && value[0] >= '0' && value[0] <= '3' ? value[0] - '0' : 3,
+                std::memory_order_relaxed);
+    }
+    return mode.load(std::memory_order_relaxed);
+}
+
+// Late-frame skip, default ON, FOUR rules (each from a measurement of 2026-11-05 on the NX809J; see AGENTS.md):
+//  1. Media3 shouldDropFrame (MediaCodecVideoRenderer / VideoFrameReleaseControl): a frame more than 30 ms late is skipped.
+//  2. Hold after a rate decrease (kPostDecreaseHoldNanos): no skip for 1.5 s.
+//  3. Force render (kMedia3ForceRenderNanos), Media3 shouldForceRenderOutputBuffer, evaluated BEFORE the drop upstream and left out by the first port: nothing shown for 100 ms -> no skip.
+//  4. Backlog (kBacklogMinWaitNanos), ours, no upstream equivalent: skip only while decoded frames are waiting.
+// Rule 1 in detail: Media3's shouldDropFrame (MediaCodecVideoRenderer / VideoFrameReleaseControl) at the release stage.  A frame whose release time is more than
+// kMedia3LateDropNanos (30 ms, MIN_EARLY_US_LATE_THRESHOLD) in the past on the audio clock is skipped (release(false), the existing -2 path) so that the video catches up with the
+// audio; no content-rate gate and no limit on consecutive skips, as upstream.  The lateness is audioEarlyNs, computed from the SMOOTHED position that Java hands over with
+// nativeNoteAudioClock (not the raw IJK sample).
+// Hold after a rate DECREASE (2026-11-05, measured on the 4x long press release): the video pipeline stalls ~0.2 s while the schedulers restart, the audio clock keeps running at the old
+// rate, the video falls 0.2-0.9 content seconds behind, and the skip turned that into a burst of 9-23 dropped frames (one 308 ms freeze at 4x; none with the skip off, where the video
+// catches up smoothly within ~0.7 s).  So for kPostDecreaseHoldNanos after a decrease (including back to 1x) no frame is skipped; a rate increase does not hold (the 5x/24 fps
+// deficit recovery needs the skip right after the press).
+// `debug.biliextended.exp`: unset = skip on with the hold, only within 2 s after a rate change (default); "3" = same window WITHOUT the post-decrease hold; "0" = skip off (rollback); re-read every 2 s.
+constexpr uint64_t kPostDecreaseHoldNanos = 1'500'000'000ULL;
+// Media3 shouldForceRenderOutputBuffer: a late frame (early < -30 ms) is rendered, not skipped, when nothing was shown for more than 100 ms.  Without it a decoder that runs at about
+// the content rate (4K60 AV1 at 4x: 245 frames/s decoded, 240 needed) can never gain on the deficit, every frame is late and the display froze for 3-8 s (measured 2026-11-05).
+constexpr uint64_t kMedia3ForceRenderNanos = 100'000'000ULL;
+// 2026-11-09 (tablet): after a 0.5 s pipeline stall the video is 0.5 s behind and the 100 ms rule above turned the catch-up into 0.7 s of a 10 Hz slideshow (one stale frame per 100 ms).
+// The decoder refills at ~200 frames/s, so a forced render every 2 VSync periods (60 Hz of consecutive frames, ~1.7x fast-forward) closes the same deficit in about the same time, smoothly.
+constexpr uint64_t kMedia3CatchUpForceRenderPeriods = 2;
+std::atomic<uint64_t> gRateDecreaseAtNs{0};
+// E2 telemetry (no behaviour): where the time between the planned call and the actual release goes.  Per released frame (nativeTakeReleaseTimestamp):
+//   wakeLate  = latest scheduleMedia3 call (IJK's refresh thread woke up) - planned call time          (IJK wake-up late / frame already late)
+//   javaDelay = nativeTakeReleaseTimestamp call - latest scheduleMedia3 call                           (IJK display path + Java hook up to the release)
+//   lead      = release stamp - nativeTakeReleaseTimestamp call                                        (the margin SurfaceFlinger gets; Media3 aims at 40-50 ms)
+std::atomic<uint64_t> gTlmCount{0}, gTlmLeadLt10{0}, gTlmLeadLt0{0}, gTlmWakeLateGt5{0};
+std::atomic<int64_t> gTlmWakeLateSum{0}, gTlmWakeLateMax{INT64_MIN}, gTlmJavaSum{0}, gTlmJavaMax{INT64_MIN}, gTlmLeadSum{0}, gTlmLeadMin{INT64_MAX};
+std::atomic<int64_t> gTlmLastWakeLate{0}, gTlmLastJava{0}, gTlmLastLead{0};
+
+void noteReleaseTiming(int64_t wakeLate, int64_t javaDelay, int64_t lead) {
+    gTlmCount.fetch_add(1, std::memory_order_relaxed);
+    gTlmWakeLateSum.fetch_add(wakeLate, std::memory_order_relaxed);
+    gTlmJavaSum.fetch_add(javaDelay, std::memory_order_relaxed);
+    gTlmLeadSum.fetch_add(lead, std::memory_order_relaxed);
+    if (lead < 10'000'000) gTlmLeadLt10.fetch_add(1, std::memory_order_relaxed);
+    if (lead < 0) gTlmLeadLt0.fetch_add(1, std::memory_order_relaxed);
+    if (wakeLate > 5'000'000) gTlmWakeLateGt5.fetch_add(1, std::memory_order_relaxed);
+    int64_t seen = gTlmWakeLateMax.load(std::memory_order_relaxed);
+    while (wakeLate > seen && !gTlmWakeLateMax.compare_exchange_weak(seen, wakeLate, std::memory_order_relaxed)) {
+    }
+    seen = gTlmJavaMax.load(std::memory_order_relaxed);
+    while (javaDelay > seen && !gTlmJavaMax.compare_exchange_weak(seen, javaDelay, std::memory_order_relaxed)) {
+    }
+    seen = gTlmLeadMin.load(std::memory_order_relaxed);
+    while (lead < seen && !gTlmLeadMin.compare_exchange_weak(seen, lead, std::memory_order_relaxed)) {
+    }
+    gTlmLastWakeLate.store(wakeLate, std::memory_order_relaxed);
+    gTlmLastJava.store(javaDelay, std::memory_order_relaxed);
+    gTlmLastLead.store(lead, std::memory_order_relaxed);
+}
+
+// Status-line fragment of the E2 telemetry: one snapshot per second (read and reset in a fixed order).
+std::string tlmStatusFragment() {
+    const int64_t n = static_cast<int64_t>(gTlmCount.exchange(0));
+    const int64_t wSum = gTlmWakeLateSum.exchange(0), jSum = gTlmJavaSum.exchange(0), lSum = gTlmLeadSum.exchange(0);
+    const int64_t wMax = gTlmWakeLateMax.exchange(INT64_MIN), jMax = gTlmJavaMax.exchange(INT64_MIN), lMin = gTlmLeadMin.exchange(INT64_MAX);
+    const uint64_t w5 = gTlmWakeLateGt5.exchange(0), l10 = gTlmLeadLt10.exchange(0), l0 = gTlmLeadLt0.exchange(0);
+    auto avgUs = [n](int64_t sum) { return n == 0 ? 0 : sum / 1000 / n; };
+    return " tlm[n/wakeLateAvgUs/wakeLateMaxUs/>5ms/javaDelayAvgUs/javaDelayMaxUs/leadAvgUs/leadMinUs/lead<10ms/lead<0]="
+            + std::to_string(n) + "/" + std::to_string(avgUs(wSum)) + "/" + std::to_string(n == 0 ? 0 : wMax / 1000) + "/" + std::to_string(w5) + "/"
+            + std::to_string(avgUs(jSum)) + "/" + std::to_string(n == 0 ? 0 : jMax / 1000) + "/" + std::to_string(avgUs(lSum)) + "/"
+            + std::to_string(n == 0 ? 0 : lMin / 1000) + "/" + std::to_string(l10) + "/" + std::to_string(l0);
+}
+
+// Late-frame skip: a frame later than the user's "late-drop" slider is dropped (release(false)) whenever the decoder has frames waiting (rule 4).  There is NO time window: the 2 s
+// after a rate change that an earlier version used was an AI misreading of the user's goal ("unstable for 2 s after a speed change is acceptable, but it must be aligned and steady
+// after that") -- and it left a video that started late (start, reopen, seek: no rate change) behind the audio for good.
+constexpr uint64_t kSkipWindowAfterRateChangeNanos = 2'000'000'000ULL;
+std::atomic<uint64_t> gRateChangeAtNs{0};
+// Rule 4: skipping a late frame only helps when frames are already decoded and waiting (the display can jump ahead through them).  When the decoder is the bottleneck (4K60 AV1 at 4x:
+// 245 frames/s decoded, 240 needed, wait 1-4 ms) the skip cannot catch up -- it ran 5 s with 10-23 frames/s shown, 167-177 skips/s against the 119/s of plain same-VSync skips, while the
+// same clip with the skip off showed 117 fps.  Measured wait (dequeue -> release, median per second): 24 fps x5 petal 69 ms (gap recovery works), 4K30 x6 sui 38-43 ms, 4K60 x4 hana 1-4 ms.
+// Threshold 30 ms between the last two groups; EMA half-life 250 ms so the large waits at 1x die out quickly after a speed-up; no data or older than 1 s = allowed (as before).
+constexpr double kBacklogMinWaitNanos = 30e6;
+constexpr double kBacklogHalfLifeNanos = 250e6;
+constexpr uint64_t kBacklogStaleNanos = 1'000'000'000ULL;
+
+bool decodeBacklogAllowsSkip(uint64_t now) {
+    const uint64_t at = gDecodeWaitAtNs.load(std::memory_order_acquire);
+    if (at == 0 || now - at > kBacklogStaleNanos) {
+        return true;
+    }
+    return gDecodeWaitEmaNs.load(std::memory_order_relaxed) >= kBacklogMinWaitNanos;
+}
+
+// E1 (A/B switch, 2026-11-06): `debug.biliextended.exp` = "9" turns the one-way timeline lead lock OFF while playing off 1x (commitMedia3Frame / scheduleMedia3: the whole
+// timeline is no longer pushed later). Default off-1x cap is 2 VSyncs (was 4; chosen 2026-11-06 after half-cap A/B).  Everything else is the default behaviour (late-frame skip within 2 s of a rate change, hold, force render).
+std::atomic<bool> gLeadLockOff{false};
+std::atomic<bool> gLeadLockHalfCap{false};
+
+int lateFrameSkipMode() {
+    static std::atomic<uint64_t> checkedAt{0};
+    static std::atomic<int> mode{2};
+    const uint64_t now = monotonicNanos();
+    const uint64_t last = checkedAt.load(std::memory_order_relaxed);
+    if (last == 0 || now - last >= 2'000'000'000ULL) {
+        checkedAt.store(now, std::memory_order_relaxed);
+        char value[PROP_VALUE_MAX] = {0};
+        const int length = __system_property_get("debug.biliextended.exp", value);
+        mode.store(length == 1 && value[0] == '0' ? 0 : (length == 1 && value[0] == '3' ? 1 : 2), std::memory_order_relaxed);
+        gLeadLockOff.store(length == 1 && value[0] == '9', std::memory_order_relaxed);
+        gLeadLockHalfCap.store(length == 2 && value[0] == '1' && value[1] == '0', std::memory_order_relaxed);
+        char handoff[PROP_VALUE_MAX] = {0};
+        const int handoffLength = __system_property_get("debug.biliextended.handoff", handoff);
+        gHandoffDenseSkip.store(handoffLength == 4 && handoff[0] == 's' && handoff[1] == 'k'
+                && handoff[2] == 'i' && handoff[3] == 'p', std::memory_order_relaxed);
+        // Experiment (2026-11-09): `debug.biliextended.ready <ms>` overrides the ready window.  The window decides WHEN a frame is handed to the codec relative to the
+        // timestamp (released as soon as it is <= window ahead), i.e. its arrival phase at the main process's GL thread, which draws once per app VSync and
+        // replaces an undrawn frame when a second one arrives in the same interval.
+        char ready[PROP_VALUE_MAX] = {0};
+        const int readyLength = __system_property_get("debug.biliextended.ready", ready);
+        if (readyLength > 0) {
+            const int ms = std::atoi(ready);
+            if (ms >= 5 && ms <= 50) gMedia3ReadyWindowNanos.store(static_cast<uint64_t>(ms) * 1'000'000ULL, std::memory_order_relaxed);
+        }
+        char vsyncOff[PROP_VALUE_MAX] = {0};
+        const int vsyncOffLength = __system_property_get("debug.biliextended.vsync_off_pct", vsyncOff);
+        {
+            const int pct = vsyncOffLength > 0 ? std::atoi(vsyncOff) : static_cast<int>(kMedia3VsyncOffsetPercent);
+            gMedia3VsyncOffsetPercent.store(static_cast<uint64_t>(pct >= 0 && pct <= 150 ? pct : static_cast<int>(kMedia3VsyncOffsetPercent)), std::memory_order_relaxed);
+        }
+        char phase[PROP_VALUE_MAX] = {0};
+        const int phaseLength = __system_property_get("debug.biliextended.phase", phase);
+        gPhaseLockEnabled.store(!(phaseLength == 1 && phase[0] == '0'), std::memory_order_relaxed);   // on by default; `phase` = 0 turns it off
+        char cadence[PROP_VALUE_MAX] = {0};
+        const int cadenceLength = __system_property_get("debug.biliextended.cadence", cadence);
+        gCadenceLockEnabled.store(!(cadenceLength == 1 && cadence[0] == '0'), std::memory_order_relaxed);   // on by default; `cadence` = 0 turns it off
+        char gridRace[PROP_VALUE_MAX] = {0};
+        const int gridRaceLength = __system_property_get("debug.biliextended.gridrace", gridRace);
+        gGridRaceFix.store(!(gridRaceLength == 1 && gridRace[0] == '0'), std::memory_order_relaxed);   // on by default; `gridrace` = 0 = old test (A/B only)
+    }
+    return mode.load(std::memory_order_relaxed);
+}
+
+bool leadLockDisabled() {
+    lateFrameSkipMode();   // refreshes the property (every 2 s)
+    return gLeadLockOff.load(std::memory_order_relaxed);
+}
+
+bool leadLockHalfCap() {
+    lateFrameSkipMode();
+    return gLeadLockHalfCap.load(std::memory_order_relaxed);
+}
+
+bool lateFrameSkipEnabled(uint64_t now) {
+    const int mode = lateFrameSkipMode();
+    if (mode == 0) return false;
+    // No time window any more (user, 2026-11-09: "skip only within 2 s of a rate change" was an AI invention; the user's goal is that playback is STABLE within 2 s of any event --
+    // start, seek, reopen, rate change).  A frame later than the user's "late-drop" slider is dropped whenever the decoder has frames waiting (rule 4 below).
+    if (mode == 2) {
+        const uint64_t decreaseAt = gRateDecreaseAtNs.load(std::memory_order_acquire);
+        if (decreaseAt != 0 && now - decreaseAt < kPostDecreaseHoldNanos) return false;
+    }
+    return decodeBacklogAllowsSkip(now);
+}
+
+// `setprop debug.biliextended.decide 1`: one logcat line per scheduling decision that is not routine.
+bool decideEnabled(uint64_t now) {
+    static std::atomic<uint64_t> checkedAt{0};
+    static std::atomic<bool> enabled{false};
+    const uint64_t last = checkedAt.load(std::memory_order_relaxed);
+    if (last == 0 || now - last >= 2'000'000'000ULL) {
+        checkedAt.store(now, std::memory_order_relaxed);
+        char value[PROP_VALUE_MAX] = {0};
+        const int length = __system_property_get("debug.biliextended.decide", value);
+        enabled.store(length > 0 && value[0] == '1', std::memory_order_relaxed);
+    }
+    return enabled.load(std::memory_order_relaxed);
+}
 
 void logInfo(const std::string& message) {
     __android_log_print(ANDROID_LOG_INFO, kTag, "%s", message.c_str());
@@ -1426,6 +1781,7 @@ bool hookEglSwapBuffersImport(const dl_phdr_info* info, ProducerHookSearch* sear
             return false;
         }
         if (original != nullptr) {
+            bsbRecordGotPatch(slot, reinterpret_cast<void*>(countedEglSwapBuffers), original);
             EglSwapBuffers expected = nullptr;
             gOriginalEglSwapBuffers.compare_exchange_strong(
                     expected, reinterpret_cast<EglSwapBuffers>(original));
@@ -1461,6 +1817,9 @@ void sampleProducerStats(std::string statsPath) {
     writeProducerStats(statsPath, 0.0, 0.0, 0);
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (bsbNativeRetired()) {
+            return;   // handed over to a hot-reloaded generation
+        }
         const auto now = std::chrono::steady_clock::now();
         const uint64_t currentCount = gSuccessfulEglSwaps.load(std::memory_order_relaxed);
         const double elapsedSeconds = std::chrono::duration<double>(now - previousTime).count();
@@ -1630,6 +1989,13 @@ std::vector<RawSample> drainRawSamples() {
 void rawSampleWriter(int descriptor) {
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        if (!debugLogEnabled(monotonicNanos()) || bsbNativeRetired()) {
+            // The hidden switch went off: stop writing and drop what is queued.
+            gRawSampleWriterStarted.store(false, std::memory_order_release);
+            drainRawSamples();
+            close(descriptor);
+            return;
+        }
         const std::vector<RawSample> samples = drainRawSamples();
         if (samples.empty()) {
             continue;
@@ -1701,6 +2067,9 @@ void updateMinimum(std::atomic<int64_t>* destination, int64_t candidate) {
 void reportRefreshAnomaly(const char* source, uint64_t valueNanos,
                           uint64_t requestedNanos, uint64_t actualNanos) {
     const uint64_t now = monotonicNanos();
+    if (!debugLogEnabled(now)) {
+        return;
+    }
     uint64_t previous = gLastAnomalyReportNanos.load(std::memory_order_relaxed);
     if (previous != 0 && now - previous < kAnomalyReportIntervalNanos) {
         return;
@@ -1732,6 +2101,14 @@ void reportRefreshAnomaly(const char* source, uint64_t valueNanos,
 }
 
 void reportRefreshTelemetry(uint64_t now) {
+    if (!debugLogEnabled(now)) {
+        return;
+    }
+    if (!gRawSampleWriterStarted.load(std::memory_order_acquire) && !gRawSamplePath.empty()
+            && !gRawSampleStarting.exchange(true, std::memory_order_acq_rel)) {
+        startRawSampleWriter(gRawSamplePath);
+        gRawSampleStarting.store(false, std::memory_order_release);
+    }
     uint64_t reportAt = gLastTelemetryReportNanos.load(std::memory_order_relaxed);
     if (reportAt != 0 && now - reportAt < 1'000'000'000ULL) {
         return;
@@ -2101,6 +2478,7 @@ void advanceFrameTimer(SchedulerState& S, uint64_t now, bool fromDisplay) {
         // Recorded even before the mirror is valid: scheduling only starts once the Java
         // hook has proven that it sees this codec's displays.
         S.lastNoteNanos.store(now, std::memory_order_release);
+        S.dueNoDisplaySinceNs.store(0, std::memory_order_relaxed);
     }
     if (!S.frameTimerValid.load(std::memory_order_acquire)) {
         return;
@@ -2155,34 +2533,110 @@ void advanceFrameTimer(SchedulerState& S, uint64_t now, bool fromDisplay) {
 //   adjusted    = lastAdjusted + frameDuration * n   when the estimator is synced and the
 //                 result is within 20 ms of unadjusted (adjustReleaseTime)
 //   releaseTs   = closestVsync(adjusted) - 80 % of a period
-//   release     = 45 ms before releaseTs (Media3: first 10 ms poll with earlyUs <= 50 ms)
+//   release     = first poll inside min(Media3 early window, pipeline target lead); otherwise recheck within 10 ms
 //
-// The returned delay makes IJK's frame_timer + delay land on that release time; the Java
-// hook then calls releaseOutputBuffer(index, releaseTs) and SurfaceFlinger holds the buffer
-// until its slot, so the call phase itself no longer decides the slot.
+// The returned value is relative to IJK's frame_timer, NOT a sleep duration. While too early,
+// move this iteration's deadline to now + 10 ms so IJK keeps the frame and computes again.
+// Once ready, release now with releaseTs; SurfaceFlinger still owns the presentation slot.
 double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, uint64_t estimate,
                       uint64_t baseDelay, uint64_t now) {
+    // The experiment properties are re-read every 2 s by lateFrameSkipMode(), which until 2026-11-11 was only reached through a few branches (a late frame, a lead-lock offset):
+    // in a clean steady state nothing called it, so a property changed between two rounds of a reused process was not seen (measured: 2 of 4 "cadence off" rounds still ran locked).
+    lateFrameSkipMode();
     if (S.media3ResetRequested.exchange(false, std::memory_order_acq_rel)) {
         S.media3Estimator.reset();
         S.media3PresentationNs = 0;
         S.media3IdealValid = false;
         S.media3HaveLastAdjusted = false;
         S.media3LastReleaseTsNs = 0;
+        S.media3LastShownNs = 0;
         S.media3PendingValid = false;
         S.media3LatencyOffsetNs = 0;
         S.media3LateStreak = 0;
         S.media3FramesSinceResync = 0;
+        S.cad = cadence_lock::State();
     }
     // Unadjusted release time: the PTS timeline, anchored to IJK's own display time when it
     // (re)starts and advanced by each displayed frame's PTS duration afterwards.
     const uint64_t ijkIntended = estimate + baseDelay;
-    uint64_t ideal = S.media3CommittedIdealNs + baseDelay;
+    // Advance by the AVERAGE content frame duration divided by the rate, not by IJK's per-frame delay: 120 fps clips carry 8/8/9 ms PTS
+    // steps (an integer-ms timebase cannot express 8.3333), so the per-frame delay adds +0.67 ms every three frames and slips a whole
+    // VSync about every 12.5 frames -- 60 two-slot intervals in ~2000 frames at 1x, and 24/24/27 ms handoffs (2/3/5 presented slots) at
+    // 1/3x.  The estimator's matched average is the uniform value this needs.  Guard: only trust it when it agrees with IJK's request
+    // within one panel period, so a seek or a rate change still takes the resync path.
+    uint64_t idealStepNs = baseDelay;
+    {
+        const int64_t fdNs = static_cast<int64_t>(gMedia3FrameDurationNs.load(std::memory_order_relaxed));   // content frame duration, written at 2590
+        const double speedNow = gPlaybackRateUnity.load(std::memory_order_acquire)
+                ? 1.0 : gPlaybackRate.load(std::memory_order_acquire);
+        if (fdNs > 0 && speedNow > 0.01) {
+            const int64_t avg = static_cast<int64_t>(std::llround(static_cast<double>(fdNs) / speedNow));
+            if (avg > 0 && std::llabs(static_cast<int64_t>(baseDelay) - avg) <= static_cast<int64_t>(period)) {
+                idealStepNs = static_cast<uint64_t>(avg);
+                gIdealStepFromAvg.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                gIdealStepRejected.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        gLastIdealStepNs.store(idealStepNs, std::memory_order_relaxed);
+    }
+    uint64_t ideal = S.media3CommittedIdealNs + idealStepNs;
     bool resync = false;
     const uint64_t resyncBand = period * kScheduleIdealResyncPeriods;
+    // Media3: the unadjusted release time is now + earlyUs, earlyUs from the audio position.
+    // Without a fresh audio sample or a displayed frame to count from (start, seek) the PTS
+    // timeline below is used until both exist.
+    bool audioDerived = false;
+    int64_t audioEarlyNs = 0;
+    {
+        const int64_t lastPts = S.lastDisplayedPtsNs.load(std::memory_order_acquire);
+        const uint64_t sampleNs = gAudioSampleNs.load(std::memory_order_acquire);
+        const double audioSpeed = gAudioSpeed.load(std::memory_order_acquire);
+        if (lastPts != INT64_MIN && sampleNs != 0 && now >= sampleNs
+                && now - sampleNs <= kAudioClockMaxAgeNanos && audioSpeed >= 0.25
+                && audioSpeed <= kMaxAudioSpeed) {
+            const double contentSpeed = gPlaybackRateUnity.load(std::memory_order_acquire)
+                    ? 1.0 : gPlaybackRate.load(std::memory_order_acquire);
+            const int64_t framePtsNs = lastPts
+                    + static_cast<int64_t>(std::llround(static_cast<double>(baseDelay) * contentSpeed));
+            const double positionNs = static_cast<double>(gAudioPosNs.load(std::memory_order_acquire))
+                    + static_cast<double>(now - sampleNs) * audioSpeed;
+            audioEarlyNs = static_cast<int64_t>(std::llround(
+                    (static_cast<double>(framePtsNs) - positionNs
+                            - static_cast<double>(kAudioDisplayLatencyNanos)) / audioSpeed));
+            audioDerived = true;
+            const uint64_t ageNs = now - sampleNs;
+            const uint64_t ageMs = ageNs / 1'000'000;
+            gSampleAgeBuckets[ageMs < 20 ? 0 : ageMs < 40 ? 1 : ageMs < 60 ? 2 : ageMs < 90 ? 3
+                    : ageMs < 150 ? 4 : ageMs < 400 ? 5 : 6].fetch_add(1, std::memory_order_relaxed);
+            uint64_t seenAge = gSampleAgeMaxNs.load(std::memory_order_relaxed);
+            while (ageNs > seenAge && !gSampleAgeMaxNs.compare_exchange_weak(seenAge, ageNs,
+                    std::memory_order_relaxed)) {
+            }
+        } else {
+            S.lastAudioEarlyNs.store(INT64_MAX, std::memory_order_relaxed);
+            if (sampleNs != 0 && now >= sampleNs && now - sampleNs > kAudioClockMaxAgeNanos) {
+                gSampleStale.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     // A timeline persistently behind the actual refresh also resyncs, not only one beyond the
     // 60-period band: measured 2026-10-26, a start left it 200-370 ms behind for good (every
     // timestamp expired, the lead lock pinned at its cap, frame_timer re-anchors every frame).
     // Media3 cannot get there because it derives every release time from the current clock.
+    if (audioDerived) {
+        S.lastAudioEarlyNs.store(audioEarlyNs, std::memory_order_relaxed);
+        const int64_t unadjusted = static_cast<int64_t>(now) + audioEarlyNs;
+        ideal = unadjusted > 0 ? static_cast<uint64_t>(unadjusted) : 0;
+        resync = !S.media3IdealValid;
+        gMedia3AudioScheduled.fetch_add(1, std::memory_order_relaxed);
+        gEarlySumNs.fetch_add(audioEarlyNs, std::memory_order_relaxed);
+        gEarlyCount.fetch_add(1, std::memory_order_relaxed);
+        int64_t seenMin = gEarlyMinNs.load(std::memory_order_relaxed);
+        while (audioEarlyNs < seenMin
+                && !gEarlyMinNs.compare_exchange_weak(seenMin, audioEarlyNs, std::memory_order_relaxed)) {
+        }
+    } else {
     if (S.media3IdealValid && ideal + kMedia3BehindResyncNanos < now) {
         S.media3BehindStreak++;
     } else {
@@ -2196,6 +2650,7 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
         // from the current time at the earliest.
         ideal = behindResync ? std::max(ijkIntended, now) : ijkIntended;
         resync = true;
+    }
     }
 
     // adjustReleaseTime(): smooth to the fixed frame rate.  Frames IJK dropped show up as a
@@ -2235,15 +2690,63 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
     else { before = snapped; after = snapped + p; }
     snapped = (after - adjusted) < (adjusted - before) ? after : before;
     uint64_t releaseTs = static_cast<uint64_t>(snapped)
-            - period * kMedia3VsyncOffsetPercent / 100;
+            - period * gMedia3VsyncOffsetPercent.load(std::memory_order_relaxed) / 100;
     // Off 1x the offset is part of the timeline itself (as validated on 4K120 at 2x: 120.0
     // renders/s, 2 holds / 8 s): call time, same-VSync skip and stamp all move together.  The
     // stamp-only lock below is for 1x; off 1x, moving only part of it produced duplicate stamps
     // and runs of unskipped frames (172 renders/s, 112 equal stamps / 8 s).
     const bool unityRate = gPlaybackRateUnity.load(std::memory_order_acquire);
-    const int64_t timelineOffset = !unityRate && S.media3LatencyOffsetNs > 0
+    const int64_t timelineOffset = !unityRate && S.media3LatencyOffsetNs > 0 && !leadLockDisabled()
             ? S.media3LatencyOffsetNs : 0;
     releaseTs += static_cast<uint64_t>(timelineOffset);
+    // Phase-locked cadence (cadence_lock.h): off 1x, content whose display interval is a whole number of VSyncs (0.5x: 2, 60 fps x 2: 1) or a whole fraction of one (120 fps x 2:
+    // every 2nd frame) does not go through the per-frame nearest-VSync snapping below -- that decided the second frame of each pair of a dense clip by a few ms of jitter
+    // (parity flips of the displayed source index).  The cadence assigns the VSyncs deterministically and only lets the audio clock steer the phase slowly.
+    cadence_lock::Decision cdec;
+    cadence_lock::Mode cmode;
+    cadence_lock::Params cparams;
+    const bool cadEnabled = gCadenceLockEnabled.load(std::memory_order_relaxed) && !unityRate && !resync;
+    const bool cadUsable = cadEnabled && audioDerived;          // an audio-derived ideal time: steers the phase; without it the lock only keeps running
+    if (cadEnabled) {
+        // The frame-rate estimator loses its sync for a few frames after an upstream drop or an irregular PTS step, and the ratio can leave the classifier's band for a frame:
+        // that used to end the lock (the status line showed a re-lock every 0.2-0.3 s at 0.5x).  Hold the last whole-number mode and content duration for 0.5 s instead.
+        if (contentDurationNs > 0) S.cadLastContentNs = contentDurationNs;
+        const int64_t contentForCad = contentDurationNs > 0 ? contentDurationNs : (now - S.cadLastModeNs < 500'000'000ULL ? S.cadLastContentNs : 0);
+        cmode = cadence_lock::classify(contentForCad, speed, p);
+        if (contentForCad > 0) gCadLastRhoMilli.store(static_cast<int64_t>(1000.0 * (static_cast<double>(contentForCad) / speed) / static_cast<double>(p)), std::memory_order_relaxed);
+        if (cmode.kind != cadence_lock::Kind::kNone) {
+            if (contentDurationNs > 0) { S.cadLastMode = cmode; S.cadLastModeNs = static_cast<int64_t>(now); }
+        } else {
+            if (contentDurationNs <= 0) gCadNoneUnsynced.fetch_add(1, std::memory_order_relaxed); else gCadNoneClassify.fetch_add(1, std::memory_order_relaxed);
+            if (S.cad.locked && S.cadLastMode.kind != cadence_lock::Kind::kNone && static_cast<int64_t>(now) - S.cadLastModeNs < 500'000'000) {
+                cmode = S.cadLastMode;
+                gCadModeHeld.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        cparams.periodNs = p;
+        cparams.anchorNs = anchorSigned;
+        // The cadence drops a kept frame only once the picture is later than the user's "比聲音晚到多少毫秒允許丟幀" slider (media3_late_drop_ms, default 30 ms), the same
+        // limit the late-frame skip of the normal path uses.  Its own P/2 + 3 ms (7.2 ms at 120 Hz) ignored the setting and dropped kept frames on the ordinary wander of the
+        // audio clock (2026-11-11, phone, petal x 10, module 202: drops at a picture only 5-8 ms late; at 10x the content is slower than the panel, so a drop is never needed
+        // for the beat, only for a real lag).  Never narrower than the old value.
+        {
+            const int64_t lateDrop = gMedia3LateDropThresholdNanos.load(std::memory_order_relaxed);
+            const int64_t marginFromSetting = lateDrop - p / 2;
+            if (marginFromSetting > cparams.dropMarginNs) cparams.dropMarginNs = marginFromSetting;
+        }
+        // ABSOLUTE content index of this frame (content time since the reset / content frame duration): the kept set of a dense clip is a fixed residue class of it,
+        // so a re-lock, a decoder stall or an audio dropout never moves it (the old per-lock counter flipped the parity at every re-lock)
+        const int64_t pendingContentNs = S.media3PresentationNs + 1000 * static_cast<int64_t>(std::llround(static_cast<double>(baseDelay) * speed / 1000.0));
+        const int64_t absIdx = contentForCad > 0
+                ? static_cast<int64_t>(std::llround(static_cast<double>(pendingContentNs) / static_cast<double>(contentForCad))) : 0;
+        cdec = cadence_lock::decide(S.cad, cmode, cparams, static_cast<int64_t>(ideal), absIdx, static_cast<int64_t>(now));
+    }
+    const bool cadLocked = cdec.active;
+    S.cadPendingDecision = cdec;
+    S.cadPendingMode = cmode;
+    S.cadPendingParams = cparams;
+    S.cadPendingIdealNs = static_cast<int64_t>(ideal);
+    S.cadPendingUsable = cadUsable;
     // Hysteresis at the beat crossing.  closestVsync() snaps against the latest sampled VSync,
     // whose timestamp jitters a little; while the adjusted time sits near the midpoint between
     // two slots, consecutive frames flipped between them.  A flip later is a two-slot step (a
@@ -2251,7 +2754,7 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
     // several holds (60 fps at 2x: pairs of holds 20-60 ms apart, 16 / 8 s against a ~7 beat).
     // Take the second slot only once the adjusted time is clearly past the midpoint.
     bool hysteresisHeld = false;
-    if (!resync && S.media3LastReleaseTsNs != 0) {
+    if (!cadLocked && !resync && S.media3LastReleaseTsNs != 0) {
         const int64_t last = static_cast<int64_t>(S.media3LastReleaseTsNs);
         const int64_t step = static_cast<int64_t>(releaseTs) - last;
         // Slots one frame normally takes: 1 for 120 fps, 2 for 60 fps at 1x, 4 at 0.5x.
@@ -2260,7 +2763,7 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
         const int64_t expected = std::max<int64_t>(1, (frameNs + p / 2) / p);
         if (std::llabs(step - (expected + 1) * p) < p / 4) {
             const int64_t adjustedRelease = adjusted
-                    - static_cast<int64_t>(period * kMedia3VsyncOffsetPercent / 100)
+                    - static_cast<int64_t>(period * gMedia3VsyncOffsetPercent.load(std::memory_order_relaxed) / 100)
                     + timelineOffset;
             const int64_t margin = std::min<int64_t>(kMedia3SnapHysteresisNanos, p / 4);
             if (adjustedRelease < last + expected * p + p / 2 + margin) {
@@ -2270,14 +2773,27 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
         }
     }
     // Media3 skips a frame whose release time equals the previous one (content faster than
-    // the display).  IJK cannot skip from here, so the frame takes the next VSync instead;
-    // the fps bypass keeps genuinely faster content away from this path.
+    // the display).  Pushing to the next slot without skipping keeps a P-spaced timestamp but
+    // still hands off on the wall clock immediately (overlay gaps << 1 ms).  Same-VSync skip
+    // (Surface external) or the handoff gate on denser content must skip instead.
     bool sameVsync = false;
     bool skip = false;
-    if (!resync && S.media3LastReleaseTsNs != 0 && releaseTs <= S.media3LastReleaseTsNs) {
-        if (gMedia3SkipSameVsync.load(std::memory_order_relaxed)
-                && baseDelay * 100 < period * 85) {
-            // Media3: skip the frame, the previous one already owns this VSync.
+    if (cadLocked) {
+        // the cadence owns the slot assignment: a kept frame takes its planned VSync, the others are skipped (release(false)) exactly like a same-VSync frame
+        if (cdec.keep) {
+            releaseTs = static_cast<uint64_t>(cdec.snappedNs - static_cast<int64_t>(period * gMedia3VsyncOffsetPercent.load(std::memory_order_relaxed) / 100) + timelineOffset);
+        } else {
+            if (S.media3LastReleaseTsNs != 0) releaseTs = S.media3LastReleaseTsNs;
+            skip = true;
+        }
+    }
+    if (!cadLocked && !resync && S.media3LastReleaseTsNs != 0 && releaseTs <= S.media3LastReleaseTsNs) {
+        const bool denserByBase = baseDelay * 100 < period * 85;
+        const bool denserByD = frameDurationNs > 0
+                && frameDurationNs < static_cast<int64_t>(period) - kMedia3HandoffMatchBandNanos;
+        const bool denser = denserByBase || denserByD;
+        if (denser) {
+            // Previous frame already owns this VSync / denser than the panel: do not hand off.
             releaseTs = S.media3LastReleaseTsNs;
             skip = true;
         } else {
@@ -2286,18 +2802,134 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
         }
     }
 
-    // Release 45 ms before the timestamp; a frame already inside that window goes now.
-    // Off 1x the lock offset also moves the call time (decoder-bound content such as 4K120 at
-    // 2x: frames come just in time, and with the call time already past IJK released them in
-    // decoder bursts, 160 renders/s instead of 120 after the same-VSync skip).  At 1x only the
-    // stamp moves, otherwise IJK's release would follow the call and the lead chase itself.
-    const uint64_t callTime = releaseTs > static_cast<uint64_t>(kMedia3ReleaseLeadNanos)
-            ? releaseTs - kMedia3ReleaseLeadNanos : now;
-    uint64_t delay = callTime > estimate ? callTime - estimate : 0;
-    if (delay > baseDelay + period) {
-        delay = baseDelay + period;
-        gScheduleDelayCapped.fetch_add(1, std::memory_order_relaxed);
+    // Late-frame skip (default on, see lateFrameSkipEnabled).  A deficit built up while the audio clock ramps up after a rate request (measured 2026-11-05: -1.0 s at 24 fps x 5 =
+    // 120 fps, where there is no spare VSync to catch up) otherwise stays for good.  A late frame is always "same VSync" above (its time is in the past); the skip replaces that.
+    if (!cadLocked && !skip && !resync && audioDerived && S.media3LastReleaseTsNs != 0 && audioEarlyNs < -gMedia3LateDropThresholdNanos.load(std::memory_order_relaxed) && lateFrameSkipEnabled(now)
+            && (S.media3LastShownNs == 0 || now - S.media3LastShownNs <= std::min<uint64_t>(kMedia3ForceRenderNanos, kMedia3CatchUpForceRenderPeriods * period))) {
+        releaseTs = S.media3LastReleaseTsNs;
+        skip = true;
+        sameVsync = false;
     }
+
+    S.tlmLastScheduleNowNs = now;
+    // MediaCodecRenderer / VideoFrameReleaseControl: hold while adjusted earlyUs > 50 ms,
+    // poll again in about 10 ms, otherwise release (or honour the existing skip verdict).
+    // releaseTs is in real time: its audio-derived PTS delta has already been divided by speed.
+    // The existing timeline/1x stamp-only lead locks are unchanged; every speed uses this gate.
+    // compute_target_delay returns a deadline RELATIVE TO frame_timer, not a sleep interval:
+    // min(delay, 10 ms) would consume the frame prematurely. Moving only this iteration's
+    // check deadline to now + 10 ms keeps the same frame pending until the next evaluation.
+    // Unlike Media3's direct Surface, Bilibili redraws through a second, timestamped GL
+    // BufferQueue. Offline poll N traces (2026-11-06) showed ~48 ms lead with GL dequeueBuffer
+    // blocking 4.6-5.7 ms median, coalescing codec arrivals before a draw. Bound in-flight lead
+    // by the ALREADY EXISTING pipeline target (33 ms), not a rate/content-specific constant.
+    // This is readiness/backpressure only: retain the release timestamp, lead-lock target,
+    // late-skip policy and 10 ms re-evaluation cadence unchanged for every playback speed.
+    const uint64_t readyWindow = gMedia3ReadyWindowNanos.load(std::memory_order_relaxed);
+    const bool tooEarlyByReady = !skip && releaseTs > now && releaseTs - now > readyWindow;
+    // 交出幀門檻 / handoff gate (per frame; decision in handoff_gate.h, host-tested).  P = measured
+    // VSync period, D = frameDurationNs (estimator content duration / playback speed; 0 when
+    // unsynced).  The next handoff is never sooner than lastHandoff + pace - 1 ms on the wall clock,
+    // pace = D when the content is slower than the panel (D > P + 1 ms), otherwise P.  A frame that
+    // arrives sooner is HELD until then (IJK re-evaluates it): it is not excess, it belongs to a
+    // later slot -- skipping it emptied the whole picture queue in a burst after every handoff
+    // and left every slot without a two-frame share empty (review 2026-11-06).  Excess frames of
+    // denser content are the same-VSync ones skipped above.  `debug.biliextended.handoff` =
+    // "skip" keeps the literal reading (skip the early frame) for the A/B.  Never invents 8.3 ms.
+    uint64_t handoffWakeNs = 0;
+    S.phasePendingSlotNs = 0;
+    bool phaseLockActive = false;
+    // Phase lock (experiment).  The main process's GL thread draws once per app VSync and replaces a frame it has not drawn yet when the next one arrives.  The gate below paces on the
+    // ACTUAL last handoff (+ P - 1 ms, first 2 ms poll after it), so every jitter adds to the phase: the arrival drifts like a random walk across the whole period and keeps crossing the
+    // draw instant (measured 2026-11-09: 4-5 % of the frames never drawn, 2-3 % more replaced at SurfaceFlinger).  Here the handoffs sit on a fixed grid instead: slot k = app VSync +
+    // P/2 - call->arrival (arrival mid-way between two draws), one frame per n periods; the plan advances by the PLANNED slot, so an individual late wake-up does not shift the next one.
+    if (gPhaseLockEnabled.load(std::memory_order_relaxed)
+            && unityRate && !skip && !cadLocked && !resync && frameDurationNs > 0) {
+        uint64_t relPeriod = 0;
+        const uint64_t av = relayedAppVsync(now, &relPeriod);
+        if (av != 0 && relPeriod >= kScheduleMinPeriodNanos && relPeriod <= kScheduleMaxPeriodNanos) {
+            const int64_t P = static_cast<int64_t>(relPeriod);
+            const int64_t n = std::max<int64_t>(1, (frameDurationNs + P / 2) / P);
+            if (std::llabs(frameDurationNs - n * P) <= kMedia3HandoffMatchBandNanos) {
+                const int64_t base = static_cast<int64_t>(av) + P / 2 - static_cast<int64_t>(kCallToArrivalNanos);
+                auto nearestSlot = [&](int64_t t) {
+                    const int64_t k = (t - base + (t >= base ? P / 2 : -P / 2)) / P;
+                    return base + k * P;
+                };
+                auto slotAtOrAfter = [&](int64_t t) {
+                    int64_t k = (t - base) / P;
+                    if (base + k * P < t) ++k;
+                    return base + k * P;
+                };
+                int64_t target;
+                if (S.phaseLastSlotNs != 0) {
+                    target = nearestSlot(static_cast<int64_t>(S.phaseLastSlotNs) + n * P);
+                    if (target < static_cast<int64_t>(now) - P / 2) {          // more than half a period behind: re-anchor, never burst
+                        target = slotAtOrAfter(static_cast<int64_t>(now) - P / 2);
+                        gPhaseLockReanchors.fetch_add(1, std::memory_order_relaxed);
+                    }
+                } else {
+                    target = slotAtOrAfter(static_cast<int64_t>(now));
+                }
+                phaseLockActive = true;
+                S.phasePendingSlotNs = static_cast<uint64_t>(target);
+                if (target > static_cast<int64_t>(now) + 200'000) {
+                    handoffWakeNs = static_cast<uint64_t>(target);
+                    gPhaseLockHolds.fetch_add(1, std::memory_order_relaxed);
+                } else if (S.phaseCountedSlotNs != static_cast<uint64_t>(target)) {
+                    // released now: record how late it is against the plan, once per frame
+                    S.phaseCountedSlotNs = static_cast<uint64_t>(target);
+                    const int64_t late = static_cast<int64_t>(now) - target;
+                    const int bucket = late < 200'000 ? 0 : late < 1'000'000 ? 1 : late < 2'000'000 ? 2 : late < P / 2 ? 3 : late < 2 * P / 2 + P / 2 ? 4 : late < 2 * P ? 5 : 6;
+                    gPhaseLate[bucket].fetch_add(1, std::memory_order_relaxed);
+                    if (S.phaseLastSlotNs != 0) {
+                        const int64_t adv = (target - static_cast<int64_t>(S.phaseLastSlotNs) + P / 2) / P;
+                        gPhaseSlotsAdvanced[adv <= 1 ? 0 : adv == 2 ? 1 : adv == 3 ? 2 : 3].fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+        }
+    }
+    // Not for cadence frames, ON PURPOSE (tried in module 204, 2026-11-11, and reverted): holding kept frames to the 交出幀門檻 spacing made the non-scheduled index steps of 4
+    // MORE frequent (petal x 10: 3 rounds with 8-15 each, against 0 in 6 rounds without it) -- a held frame then lands in the same draw interval as the next one.
+    if (!phaseLockActive && !skip && !cadLocked) {     // the cadence keeps the spacing by construction
+        uint64_t handoffPeriod = period;
+        if (handoffPeriod < kScheduleMinPeriodNanos
+                || handoffPeriod > kScheduleMaxPeriodNanos) {
+            handoffPeriod = gGridPeriodNanos.load(std::memory_order_acquire);
+        }
+        const handoff_gate::Decision gate = handoff_gate::decide(
+                handoffPeriod, frameDurationNs, S.media3LastShownNs, now,
+                kScheduleMinPeriodNanos, kScheduleMaxPeriodNanos,
+                kMedia3HandoffMatchBandNanos, kMedia3HandoffEarlyAllowanceNanos,
+                gHandoffDenseSkip.load(std::memory_order_relaxed));
+        if (gate.verdict == handoff_gate::Verdict::kHold) {
+            handoffWakeNs = gate.wakeNs;
+            gMedia3HandoffGateHolds.fetch_add(1, std::memory_order_relaxed);
+        } else if (gate.verdict == handoff_gate::Verdict::kSkip) {
+            // Literal mode.  Like every other skip here the slot stays unconsumed
+            // (media3LastReleaseTsNs is not advanced), so the next frame can still take it.
+            releaseTs = S.media3LastReleaseTsNs;
+            skip = true;
+            sameVsync = false;
+            gMedia3HandoffGateSkips.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    uint64_t callTime = now;
+    // Only the ready-window wait is stretched.  A gate skip must not keep tooEarlyByReady's
+    // wait, or the next compute_target_delay can clear skip and hand off.
+    if (tooEarlyByReady && !skip) {
+        // The release time is known, so is the moment this frame becomes ready (releaseTs - readyWindow > now): wake exactly then.  IJK's refresh loop never
+        // sleeps longer than its own ~10 ms cap, so a far-off frame is simply looked at again on the way.
+        callTime = releaseTs - readyWindow;
+        gMedia3EarlyWaits.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (handoffWakeNs > callTime) {
+        callTime = handoffWakeNs;
+    }
+    // E2 now describes the final readiness evaluation (not lateness vs a fixed 45 ms target).
+    S.tlmPendingCallTimeNs = callTime;
+    uint64_t delay = callTime > estimate ? callTime - estimate : 0;
     // A zero delay can lock playback up.  IJK only re-anchors frame_timer to the current time when
     // `delay > 0 && time - frame_timer > AV_SYNC_THRESHOLD_MAX`; with 0 it neither advances nor
     // re-anchors, every following frame is "late" again and gets 0 again, and playback falls
@@ -2309,8 +2941,45 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
         delay = kMedia3MinDelayNanos;
         gMedia3StuckReanchors.fetch_add(1, std::memory_order_relaxed);
     }
+    // Livelock guard (2026-11-09).  `delay` is relative to our mirror of IJK's frame_timer (callTime - estimate).  When the mirror is behind the real frame_timer (IJK advanced it for
+    // a drop / retry that was credited only once) a frame that is due NOW is never displayed: IJK waits for real_frame_timer + delay, and the next evaluation returns a delay that
+    // has grown by exactly the time that passed, so the gap never closes -- until the display note goes stale after 500 ms (kScheduleNoteMaxAgeNanos) and the scheduler lets go.
+    // Measured on the tablet as a 500 ms freeze of the whole codec pipeline every 30-200 s (trace: bsbV delay 24 ms, 32 ms, ... 499 ms, one step of 8.3 ms per evaluation).  A frame that
+    // is due, keeps getting a positive delay and has not been displayed for kLivelockGuardNanos gets the minimal delay (displayed at once) and the mirror is re-anchored.
+    if (callTime <= now + 1'000'000ULL && delay > kMedia3MinDelayNanos) {
+        const uint64_t since = S.dueNoDisplaySinceNs.load(std::memory_order_relaxed);
+        if (since == 0) {
+            S.dueNoDisplaySinceNs.store(now, std::memory_order_relaxed);
+        } else if (now - since > kLivelockGuardNanos) {
+            delay = kMedia3MinDelayNanos;
+            S.frameTimerEstNanos.store(now, std::memory_order_release);
+            S.dueNoDisplaySinceNs.store(now, std::memory_order_relaxed);
+            gLivelockBreaks.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 
     // Pending until this frame is displayed (compute_target_delay may run again for it).
+    if ((!S.media3PendingValid || S.media3PendingTsNs != releaseTs) && decideEnabled(now)) {
+        const int64_t step = S.media3LastReleaseTsNs != 0
+                ? static_cast<int64_t>(releaseTs) - static_cast<int64_t>(S.media3LastReleaseTsNs) : 0;
+        int64_t candDiffUs = 0;
+        if (S.media3HaveLastAdjusted && frameDurationNs > 0) {
+            const int64_t fr = std::max<int64_t>(1,
+                    (static_cast<int64_t>(baseDelay) + frameDurationNs / 2) / frameDurationNs);
+            candDiffUs = (static_cast<int64_t>(ideal)
+                    - (S.media3LastAdjustedReleaseNs + frameDurationNs * fr)) / 1000;
+        }
+        if (step > 25'000'000 || !adjustedFromCadence || sameVsync || hysteresisHeld || skip) {
+            logInfo("DECIDE t=" + std::to_string(now / 1000000) + "ms step=" + std::to_string(step / 1000)
+                    + "us resync=" + std::to_string(resync) + " cadence=" + std::to_string(adjustedFromCadence)
+                    + " candDiff=" + std::to_string(candDiffUs) + "us same=" + std::to_string(sameVsync)
+                    + " hyst=" + std::to_string(hysteresisHeld) + " skip=" + std::to_string(skip)
+                    + " audio=" + std::to_string(audioDerived) + " early=" + std::to_string(audioEarlyNs / 1000)
+                    + "us base=" + std::to_string(baseDelay / 1000) + "us fts=" + std::to_string(
+                            (static_cast<int64_t>(now) - static_cast<int64_t>(estimate)) / 1000)
+                    + "us ageMs=" + std::to_string((now - gAudioSampleNs.load(std::memory_order_relaxed)) / 1000000));
+        }
+    }
     if (!S.media3PendingValid || S.media3PendingTsNs != releaseTs) {
         if (adjustedFromCadence) gMedia3Adjusted.fetch_add(1, std::memory_order_relaxed);
         else if (S.media3HaveLastAdjusted && !resync) {
@@ -2343,8 +3012,23 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
     const uint64_t stampTs = unityRate ? static_cast<uint64_t>(
             static_cast<int64_t>(releaseTs) + S.media3LatencyOffsetNs) : releaseTs;
     S.media3PendingStampNs = stampTs;
+    S.diagFrameDurUs = frameDurationNs / 1000;
+    S.diagIdealRelUs = (static_cast<int64_t>(ideal) - static_cast<int64_t>(now)) / 1000;
+    S.diagAdjSnapUs = (adjusted - static_cast<int64_t>(releaseTs + period * gMedia3VsyncOffsetPercent.load(std::memory_order_relaxed) / 100 - static_cast<uint64_t>(timelineOffset))) / 1000;   // adjusted - chosen VSync: +-P/2 = at the flip point
+    S.diagCandDiffUs = (S.media3HaveLastAdjusted && frameDurationNs > 0)
+            ? (static_cast<int64_t>(ideal) - (S.media3LastAdjustedReleaseNs + frameDurationNs * std::max<int64_t>(1,
+                    (static_cast<int64_t>(baseDelay) + frameDurationNs / 2) / frameDurationNs))) / 1000 : 0;
+    S.diagStepUs = S.media3LastReleaseTsNs != 0 ? (static_cast<int64_t>(releaseTs) - static_cast<int64_t>(S.media3LastReleaseTsNs)) / 1000 : 0;
+    S.diagSnapRelUs = (static_cast<int64_t>(releaseTs) - static_cast<int64_t>(now)) / 1000;
+    S.diagFlags = (adjustedFromCadence ? 1u : 0u) | (resync ? 2u : 0u) | (hysteresisHeld ? 4u : 0u) | (sameVsync ? 8u : 0u) | (skip ? 16u : 0u) | (audioDerived ? 32u : 0u);
     S.media3PendingBaseDelayNs = baseDelay;
-    S.lastIntendedNanos.store(releaseTs, std::memory_order_relaxed);
+    S.media3PendingDisplayDurationNs = frameDurationNs;
+    // A frame that is late on the audio gets a release timestamp in the past; IJK's decode-stage drop
+    // (observedIsNeedDropFrame) takes "intended + 30 ms < now" as permission to drop, and it then
+    // drops every other frame while the rest still arrive late.  Late frames are shown at once
+    // instead (the video catches up in a burst); dropping stays with IJK's own late check.
+    S.lastIntendedNanos.store(kAudioLateNoIjkDrop && audioDerived
+            ? std::max<uint64_t>(releaseTs, now) : releaseTs, std::memory_order_relaxed);
     S.lastReturnedDelayNanos.store(delay, std::memory_order_release);
     S.pendingTargetTickNanos.store(releaseTs, std::memory_order_release);
     S.media3PendingSkip.store(skip, std::memory_order_release);
@@ -2355,6 +3039,20 @@ double scheduleMedia3(SchedulerState& S, uint64_t period, uint64_t vsyncAnchor, 
     gMedia3Scheduled.fetch_add(1, std::memory_order_relaxed);
     recordRawSample(RawSampleKind::kNativeSchedule, now, callTime > now ? callTime - now : 0,
             releaseTs);
+    if (delay > 20'000'000ULL && monitorEnabled(now)) {
+        // diagnosis (2026-11-09): one instant per evaluation that returns a delay above 20 ms (a livelock shows as 24, 32, 40 ... ms in a row): bsbV:<why>:<delay us returned to IJK>:<now - frame_timer mirror us>:<releaseTs - now us>:<audioEarly us>:<skip>
+        // why bits: 1 = ready window hold, 2 = handoff/phase wake in the future, 4 = phase lock active, 16 = release ts > 100 ms ahead
+        char holdBuf[128];
+        const int why = (tooEarlyByReady ? 1 : 0) | (handoffWakeNs > now ? 2 : 0) | (phaseLockActive ? 4 : 0) | (releaseTs > now + 100'000'000ULL ? 16 : 0);
+        const int Len = std::snprintf(holdBuf, sizeof(holdBuf), "bsbV:%d:%lld:%lld:%lld:%lld:%d", why, static_cast<long long>(delay / 1000),
+                static_cast<long long>(static_cast<int64_t>(now) - static_cast<int64_t>(estimate)) / 1000,
+                static_cast<long long>(static_cast<int64_t>(releaseTs) - static_cast<int64_t>(now)) / 1000,
+                static_cast<long long>(audioEarlyNs / 1000), skip ? 1 : 0);
+        if (Len > 0 && Len < static_cast<int>(sizeof(holdBuf))) {
+            ATrace_beginSection(holdBuf);
+            ATrace_endSection();
+        }
+    }
     return static_cast<double>(delay) / 1e9;
 }
 
@@ -2365,8 +3063,24 @@ void commitMedia3Frame(SchedulerState& S, uint64_t now) {
         return;
     }
     S.media3PendingValid = false;
+    if (monitorEnabled(now)) {
+        // bsbG:<flags>:<ideal-now us>:<adjusted-chosenVSync us>:<ideal-candidate us>:<release ts step us>:<release ts-now us>:<latencyOffset us>
+        // flags: 1 smoothed by the frame-rate chain, 2 resync, 4 hysteresis hold, 8 same VSync, 16 skip, 32 audio-derived
+        char gBuf[112];
+        const int GLen = std::snprintf(gBuf, sizeof(gBuf), "bsbG:%u:%lld:%lld:%lld:%lld:%lld:%lld", S.diagFlags,
+                static_cast<long long>(S.diagIdealRelUs), static_cast<long long>(S.diagAdjSnapUs), static_cast<long long>(S.diagCandDiffUs),
+                static_cast<long long>(S.diagStepUs), static_cast<long long>(S.diagSnapRelUs), static_cast<long long>(S.diagFrameDurUs));
+        if (GLen > 0 && GLen < static_cast<int>(sizeof(gBuf))) {
+            ATrace_beginSection(gBuf);
+            ATrace_endSection();
+        }
+    }
     if (S.media3PendingIsSkip) {
         gMedia3SkipDecisions.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!S.media3PendingIsSkip && S.phasePendingSlotNs != 0) {
+        S.phaseLastSlotNs = S.phasePendingSlotNs;
+        S.phasePendingSlotNs = 0;
     }
     if (S.media3PendingResync) {
         gScheduleIdealResyncs.fetch_add(1, std::memory_order_relaxed);
@@ -2375,11 +3089,31 @@ void commitMedia3Frame(SchedulerState& S, uint64_t now) {
     } else if (S.media3FramesSinceResync < 1000000) {
         S.media3FramesSinceResync++;
     }
+    if (gCadenceLockEnabled.load(std::memory_order_relaxed)) {
+        cadence_lock::commit(S.cad, S.cadPendingMode, S.cadPendingParams, S.cadPendingDecision, S.cadPendingIdealNs, static_cast<int64_t>(now), S.cadPendingUsable);
+        gCadLocked.store(S.cad.locked ? 1 : 0, std::memory_order_relaxed);
+        gCadKept.store(S.cad.kept, std::memory_order_relaxed);
+        gCadSkipped.store(S.cad.skipped, std::memory_order_relaxed);
+        gCadRepeats.store(S.cad.repeats, std::memory_order_relaxed);
+        gCadSkipSlots.store(S.cad.skipSlots, std::memory_order_relaxed);
+        gCadRelocks.store(S.cad.relocks, std::memory_order_relaxed);
+        gCadRelockStale.store(S.cad.relockStale, std::memory_order_relaxed);
+        gCadRelockInactive.store(S.cad.relockInactive, std::memory_order_relaxed);
+        gCadRelockFar.store(S.cad.relockFar, std::memory_order_relaxed);
+        gCadRelockAudio.store(S.cad.relockAudio, std::memory_order_relaxed);
+    } else if (S.cad.locked || S.cad.have || S.cad.stable) {
+        S.cad = cadence_lock::State();
+        gCadLocked.store(0, std::memory_order_relaxed);
+    }
     S.media3CommittedIdealNs = S.media3PendingIdealNs;
     S.media3IdealValid = true;
     S.media3LastAdjustedReleaseNs = S.media3PendingAdjustedNs;
     S.media3HaveLastAdjusted = true;
     S.media3LastReleaseTsNs = S.media3PendingTsNs;
+    if (!S.media3PendingIsSkip) {
+        // Actual handoff wall time for the 交出幀門檻 gate in scheduleMedia3 (not PTS).
+        S.media3LastShownNs = now;
+    }
     {
         // Back to content time for the frame-rate estimator (see scheduleMedia3).
         const double speed = gPlaybackRateUnity.load(std::memory_order_acquire)
@@ -2391,7 +3125,7 @@ void commitMedia3Frame(SchedulerState& S, uint64_t now) {
     }
     S.media3Estimator.onNextFrame(S.media3PresentationNs);
     const int64_t earlyNs = static_cast<int64_t>(S.media3PendingStampNs) - static_cast<int64_t>(now);
-    if (earlyNs < -kMedia3LateDropNanos) {
+    if (earlyNs < -gMedia3LateDropThresholdNanos.load(std::memory_order_relaxed)) {
         gMedia3LateReleases.fetch_add(1, std::memory_order_relaxed);
     }
     // Lock the release timestamp to IJK's actual release, as Media3 does.
@@ -2407,21 +3141,29 @@ void commitMedia3Frame(SchedulerState& S, uint64_t now) {
     // whenever the lead stays off the target, move the whole timeline by whole VSyncs (one
     // held frame when moving later, one dropped frame when moving earlier).
     const uint64_t period = gGridPeriodNanos.load(std::memory_order_acquire);
-    if (!S.media3PendingIsSkip && period >= kScheduleMinPeriodNanos
+    if (!S.media3PendingIsSkip && !S.cad.locked && period >= kScheduleMinPeriodNanos
             && period <= kScheduleMaxPeriodNanos && !S.media3PendingResync
             && S.media3FramesSinceResync >= kMedia3LatencySettleFrames) {
         const int64_t p = static_cast<int64_t>(period);
-        const int64_t target = p * std::max<int64_t>(2,
-                (kMedia3TargetReleaseLeadNanos + p / 2) / p);
+        // The lead the lock holds is the user's 距離預定上屏門檻 slider (gMedia3ReadyWindowNanos, default 33 ms).  It used to be the constant
+        // kMedia3TargetReleaseLeadNanos (also 33 ms), so moving the slider changed nothing at 1x (measured 2026-11-09: 33 / 29 / 25 ms gave the same 33.8 / 32.4 / 34.5 ms lead).
+        const int64_t leadTarget = static_cast<int64_t>(gMedia3ReadyWindowNanos.load(std::memory_order_relaxed));
+        const int64_t target = p * std::max<int64_t>(2, (leadTarget + p / 2) / p);
         const int64_t deviation = earlyNs - target;
-        if (!gPlaybackRateUnity.load(std::memory_order_acquire)) {
+        if (!gPlaybackRateUnity.load(std::memory_order_acquire) && leadLockDisabled()) {
+            // E1: lead lock off while off 1x (exp = "9"): no timeline offset is built up.
+            S.media3LateStreak = 0;
+            S.media3LatencyOffsetNs = 0;
+        } else if (!gPlaybackRateUnity.load(std::memory_order_acquire)) {
             // Off 1x: the validated one-way rule.  Frames that leave less than a period early
-            // (decoder-bound, 4K120 at 2x) move the whole timeline later, up to 4 VSyncs.
+            // (decoder-bound, 4K120 at 2x) move the whole timeline later, up to 2 VSyncs
+            // (about 17 ms at 120 Hz).  exp = "9" still disables the lock entirely.
             if (earlyNs < p) {
+                const int64_t off1xCap = p * 2;
                 if (++S.media3LateStreak >= kMedia3LateStreakFrames
-                        && S.media3LatencyOffsetNs < p * 4) {
+                        && S.media3LatencyOffsetNs < off1xCap) {
                     const int64_t add = std::max<int64_t>(1, (p - earlyNs + p - 1) / p);
-                    S.media3LatencyOffsetNs = std::min<int64_t>(p * 4,
+                    S.media3LatencyOffsetNs = std::min<int64_t>(off1xCap,
                             std::max<int64_t>(0, S.media3LatencyOffsetNs) + add * p);
                     S.media3LateStreak = 0;
                     gMedia3LatencySteps.fetch_add(1, std::memory_order_relaxed);
@@ -2453,11 +3195,26 @@ void commitMedia3Frame(SchedulerState& S, uint64_t now) {
     }
 }
 
-double scheduleReleaseDelay(void* player, double baseDelaySeconds,
-                            double originalDelaySeconds, uint64_t now) {
+thread_local int tlsScheduleFailReason = 0;   // why the last scheduleReleaseDelayImpl() call returned -1 (bsbU trace)
+
+double scheduleReleaseDelayImpl(void* player, double baseDelaySeconds,
+                                double originalDelaySeconds, uint64_t now) {
+    // perfetto: this is the one per-frame native entry point that ALWAYS runs (the Java releaseOutputBuffer hook can be missing on
+    // runs that go through a different rendering path, which is exactly how the bsb events disappeared on 2026-11-08).  Record a
+    // handoff instant here so the measurement never depends on the Java hook.  The Java side also writes bsbR:<pts> and carries the
+    // presentation timestamp; the analyser prefers that and falls back to this one.
+    if (monitorEnabled(now)) {
+        char traceBuf[48];
+        const int Len = std::snprintf(traceBuf, sizeof(traceBuf), "bsbS:%llu", static_cast<unsigned long long>(now));
+        if (Len > 0 && Len < static_cast<int>(sizeof(traceBuf))) {
+            ATrace_beginSection(traceBuf);
+            ATrace_endSection();
+        }
+    }
     SchedulerState& S = schedForPlayer(player);
     S.tid.store(static_cast<pid_t>(syscall(SYS_gettid)), std::memory_order_release);
     if (!gReleaseScheduling.load(std::memory_order_acquire)) {
+        tlsScheduleFailReason = 1;
         return -1.0;
     }
     uint64_t period = gGridPeriodNanos.load(std::memory_order_acquire);
@@ -2518,26 +3275,40 @@ double scheduleReleaseDelay(void* player, double baseDelaySeconds,
             }
         }
     }
-    // Content faster than the panel (120 fps on a 60 Hz mode) has to drop frames; that is
-    // IJK's job, and the slot scheduler would only push frames later and later.
+    // Content faster than the panel (120 fps on a 60 Hz mode) has to drop frames.
+    // Surface-external same-VSync skip, or the handoff gate (hold / literal skip), own that path in
+    // Media3 mode: bypassing here would dump every excess frame untimed (wall gaps << 1 ms).
     if (baseDelaySeconds > 0.0 && baseDelaySeconds * 1e9 < static_cast<double>(period) * 0.85
-            && !(gridMode == 4 && gMedia3SkipSameVsync.load(std::memory_order_relaxed))) {
+            && gridMode != 4) {
         gScheduleFpsBypassed.fetch_add(1, std::memory_order_relaxed);
+        tlsScheduleFailReason = 2;
         return -1.0;
     }
+    // A grid updated AFTER `now` was sampled is the freshest one there is, not a stale one: the VSync sampler stores
+    // gGridUpdatedNanos = monotonicNanos() on its own thread, and the caller sampled `now` before this call.  Rejecting
+    // `now < updated` released ~2-8 frames per 15 s untimed on the tablet (bsbU:33 with grid age -1, 2026-11-11 dt2):
+    // SurfaceFlinger then showed each of them one VSync early, dropped the frame before it and left a 4-slot gap.
+    const bool raceFix = gGridRaceFix.load(std::memory_order_relaxed);
+    const bool gridTooOld = updated == 0 || (raceFix ? (now > updated && now - updated > kScheduleGridMaxAgeNanos)
+                                                     : (now < updated || now - updated > kScheduleGridMaxAgeNanos));
     if (period < kScheduleMinPeriodNanos || period > kScheduleMaxPeriodNanos || anchor == 0
-            || now < updated || now - updated > kScheduleGridMaxAgeNanos
+            || gridTooOld
             || !std::isfinite(baseDelaySeconds) || baseDelaySeconds < 0.0) {
         gScheduleGridStale.fetch_add(1, std::memory_order_relaxed);
+        tlsScheduleFailReason = (period < kScheduleMinPeriodNanos || period > kScheduleMaxPeriodNanos) ? 31
+                : anchor == 0 ? 32 : gridTooOld ? 33 : 34;
         return -1.0;
     }
     const uint64_t lastNote = S.lastNoteNanos.load(std::memory_order_acquire);
-    if (lastNote == 0 || now < lastNote || now - lastNote > kScheduleNoteMaxAgeNanos) {
+    // Same race as the grid age above: a display note newer than `now` is fresh.
+    if (lastNote == 0 || (gGridRaceFix.load(std::memory_order_relaxed) ? (now > lastNote && now - lastNote > kScheduleNoteMaxAgeNanos)
+                                                                       : (now < lastNote || now - lastNote > kScheduleNoteMaxAgeNanos))) {
         gScheduleNoteStale.fetch_add(1, std::memory_order_relaxed);
         S.staleCalls.fetch_add(1, std::memory_order_relaxed);
         S.frameTimerValid.store(false, std::memory_order_release);
         S.idealValid.store(false, std::memory_order_release);
         S.lastTargetTickNanos.store(0, std::memory_order_release);
+        tlsScheduleFailReason = 4;
         return -1.0;
     }
     uint64_t estimate = S.frameTimerEstNanos.load(std::memory_order_acquire);
@@ -2553,8 +3324,10 @@ double scheduleReleaseDelay(void* player, double baseDelaySeconds,
         if (vsync == 0) {
             gScheduleGridStale.fetch_add(1, std::memory_order_relaxed);
             S.media3PendingReleaseTsNs.store(0, std::memory_order_release);
+            tlsScheduleFailReason = 5;
             return -1.0;
         }
+        tlsScheduleFailReason = 6;   // only read when scheduleMedia3 itself returns < 0
         return scheduleMedia3(S, period, vsync, estimate, baseDelay, now);
     }
     if (std::isfinite(originalDelaySeconds) && baseDelaySeconds > 0.0) {
@@ -2612,8 +3385,15 @@ double scheduleReleaseDelay(void* player, double baseDelaySeconds,
     const int64_t intendedSigned = static_cast<int64_t>(ideal) + offset;
     const uint64_t intended = intendedSigned > 0 ? static_cast<uint64_t>(intendedSigned) : 0;
     S.lastIntendedNanos.store(intended, std::memory_order_relaxed);
+    // The lead is expressed as a percentage of the panel period, which only makes sense at 120 Hz: 2.45 periods there
+    // is 20.4 ms, and that is how long the compositor needs to hold a buffer.  When the panel drops to 48 Hz for 40 fps
+    // content the same percentage asks for 51 ms, i.e. more than two refresh intervals early, and the frame cannot be
+    // held (measured 2026-11-08: only 28% of releases landed on the vSync grid, vs 2% before with a different cause).
+    // Cap it at the wall-clock value it was designed for.
+    constexpr uint64_t kMaxCallLeadNanos = 20'400'000;
+    const uint64_t leadByPercent = period * gScheduleCallLeadPercent.load(std::memory_order_relaxed) / 100;
     const uint64_t callLead = arrivalGrid ? 0
-            : period * gScheduleCallLeadPercent.load(std::memory_order_relaxed) / 100;
+            : std::min(leadByPercent, kMaxCallLeadNanos);
     // Nearest expected-presentation tick to the intended call phase, so the video clock stays
     // within +-half a period of the audio clock.  (Frames placed up to half a period late are
     // kept by our is_need_drop_frame() override; Bilibili's own check would drop them.)
@@ -2672,6 +3452,50 @@ double scheduleReleaseDelay(void* player, double baseDelaySeconds,
     recordRawSample(RawSampleKind::kNativeSchedule, now,
             callTime > now ? callTime - now : 0, tick);
     return static_cast<double>(delay) / 1e9;
+}
+
+// Timing of the scheduler hook (diagnostics): the wall time between two calls on a refresh thread
+// and the time spent inside.  How long one refresh pass really takes decides how many frames per
+// second IJK can show once frames are due (see the 1.5x / 2.0x lag in AGENTS.md).
+std::atomic<uint64_t> gTimedCalls = 0;
+std::atomic<uint64_t> gTimedNsSum = 0;
+std::atomic<uint64_t> gTimedNsMax = 0;
+std::atomic<uint64_t> gCallGapBuckets[5] = {};   // <1, 1-3, 3-6, 6-12, >12 ms between calls
+
+double scheduleReleaseDelay(void* player, double baseDelaySeconds,
+                            double originalDelaySeconds, uint64_t now) {
+    SchedulerState& S = schedForPlayer(player);
+    const uint64_t last = S.lastComputeCallNanos.exchange(now, std::memory_order_relaxed);
+    if (last != 0 && now > last) {
+        const uint64_t gap = now - last;
+        const int bucket = gap < 1'000'000 ? 0 : gap < 3'000'000 ? 1 : gap < 6'000'000 ? 2
+                : gap < 12'000'000 ? 3 : 4;
+        gCallGapBuckets[bucket].fetch_add(1, std::memory_order_relaxed);
+    }
+    tlsScheduleFailReason = 0;
+    const double result = scheduleReleaseDelayImpl(player, baseDelaySeconds, originalDelaySeconds, now);
+    if (result < 0.0 && monitorEnabled(now)) {
+        // bsbU:<reason>:<grid age us>:<note age us>  -- this frame gets NO release timestamp (released untimed, SurfaceFlinger shows it at the
+        // next VSync).  reason: 1 scheduling off, 2 fps bypass, 31 period out of range, 32 no anchor, 33 grid too old, 34 bad base delay,
+        // 4 display note too old, 5 no VSync, 6 scheduleMedia3 declined.  (2026-11-11: tablet bronya 2x, ~4 untimed frames per round = most long intervals.)
+        const uint64_t upd = gGridUpdatedNanos.load(std::memory_order_acquire);
+        const uint64_t note = S.lastNoteNanos.load(std::memory_order_acquire);
+        char uBuf[64];
+        const int ULen = std::snprintf(uBuf, sizeof(uBuf), "bsbU:%d:%lld:%lld", tlsScheduleFailReason,
+                upd != 0 && now >= upd ? static_cast<long long>((now - upd) / 1000) : -1LL,
+                note != 0 && now >= note ? static_cast<long long>((now - note) / 1000) : -1LL);
+        if (ULen > 0 && ULen < static_cast<int>(sizeof(uBuf))) {
+            ATrace_beginSection(uBuf);
+            ATrace_endSection();
+        }
+    }
+    const uint64_t spent = monotonicNanos() - now;
+    gTimedCalls.fetch_add(1, std::memory_order_relaxed);
+    gTimedNsSum.fetch_add(spent, std::memory_order_relaxed);
+    uint64_t seen = gTimedNsMax.load(std::memory_order_relaxed);
+    while (spent > seen && !gTimedNsMax.compare_exchange_weak(seen, spent, std::memory_order_relaxed)) {
+    }
+    return result;
 }
 
 // The IJK refresh (ijk_ff_vout) and decode (ijk_ff_videodec) threads run at nice 0 and lose
@@ -2766,6 +3590,7 @@ extern "C" double observedComputeTargetDelay(void* player, void* state, double i
             gDoubledTargetDelays.fetch_add(1, std::memory_order_relaxed);
         }
         if (!gIjkSignatureGotOnlyProfile.load(std::memory_order_acquire)
+                && debugLogEnabled(monotonicNanos())
                 && (originalDelayNanos >= kSmallStutter10Nanos
                         || (ratio >= 1.9 && ratio <= 2.1))) {
             const double masterClock = readMasterClock(state);
@@ -2885,6 +3710,8 @@ std::array<uint32_t, kRefreshLoopInstructionCount> vpDurationBranchStub(uintptr_
     return {kArm64LdrX17Literal8, kArm64BranchX17,
             static_cast<uint32_t>(target), static_cast<uint32_t>(target >> 32U)};
 }
+
+std::atomic<bool> gInlineProbesActive{false};
 
 std::string installVpDurationProbe() {
     LibrarySearch search;
@@ -3154,19 +3981,25 @@ extern "C" void observedVoutDisplayYuvOverlay(void* vout, void* overlay) {
     const int traceSerial = gLatestQueuePictureSerial.load(std::memory_order_relaxed);
     const int64_t tracePtsUs = gLatestQueuePicturePtsNanos.load(
             std::memory_order_relaxed) / 1000;
-    char traceName[128];
-    std::snprintf(traceName, sizeof(traceName),
-            "BiliP2_native_display_%llu_s%d_p%lld",
-            static_cast<unsigned long long>(traceToken), traceSerial,
-            static_cast<long long>(tracePtsUs));
+    // The section names are only built while a systrace is running; formatting them on every
+    // displayed frame for nothing is waste on the display thread.
     const bool traceEnabled = ATrace_isEnabled();
+    char traceName[128];
+    if (traceEnabled) {
+        std::snprintf(traceName, sizeof(traceName),
+                "BiliP2_native_display_%llu_s%d_p%lld",
+                static_cast<unsigned long long>(traceToken), traceSerial,
+                static_cast<long long>(tracePtsUs));
+    }
     if (traceEnabled) {
         ATrace_beginSection(traceName);
     }
     char traceCallName[96];
-    std::snprintf(traceCallName, sizeof(traceCallName),
-            "BiliP2_native_display_call_%llu",
-            static_cast<unsigned long long>(traceToken));
+    if (traceEnabled) {
+        std::snprintf(traceCallName, sizeof(traceCallName),
+                "BiliP2_native_display_call_%llu",
+                static_cast<unsigned long long>(traceToken));
+    }
     const uint64_t now = monotonicNanos();
     const int64_t latestPtsNanos = gLatestQueuePicturePtsNanos.load(
             std::memory_order_relaxed);
@@ -3385,6 +4218,55 @@ extern "C" int observedIsNeedDropFrame(int64_t pts, void* player, void* decoder,
             return 0;
         }
         SchedulerState& S = schedForPlayer(player);
+        const int policy = dropMode(monotonicNanos());
+        if (policy == 0) {
+            const int ijkDrop = original(pts, player, decoder, forceDrop);
+            if (ijkDrop != 0) {
+                gDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
+                advanceFrameTimer(S, monotonicNanos(), false);
+            }
+            return ijkDrop;
+        }
+        if (policy == 3 && S.lastAudioEarlyNs.load(std::memory_order_relaxed) != INT64_MAX) {
+            return 0;
+        }
+        {
+            // Per-frame decision on the audio timeline (see kForceRenderAfterNanos).
+            const int64_t lateThresholdNs = policy == 2
+                    ? gMedia3LateDropThresholdNanos.load(std::memory_order_relaxed) : 0;
+            const int64_t earlyNs = S.lastAudioEarlyNs.load(std::memory_order_relaxed);
+            if (earlyNs != INT64_MAX) {
+                const uint64_t nowDrop = monotonicNanos();
+                if (earlyNs < -kMedia3VeryLateNanos) {
+                    S.consecutiveDrops = 0;
+                    gDroppedToKeyframe.fetch_add(1, std::memory_order_relaxed);
+                    const int ijkDrop = original(pts, player, decoder, forceDrop);
+                    if (ijkDrop != 0) {
+                        advanceFrameTimer(S, nowDrop, false);
+                    }
+                    return ijkDrop;
+                }
+                if (earlyNs < -lateThresholdNs) {
+                    const uint64_t shown = S.lastDisplayNanos.load(std::memory_order_relaxed);
+                    if ((shown != 0 && nowDrop - shown > kForceRenderAfterNanos)
+                            || S.consecutiveDrops >= kMaxConsecutiveDrops) {
+                        S.consecutiveDrops = 0;
+                        gForcedRenders.fetch_add(1, std::memory_order_relaxed);
+                        return 0;
+                    }
+                    S.consecutiveDrops++;
+                    int seenMax = gMaxConsecutiveDrops.load(std::memory_order_relaxed);
+                    while (S.consecutiveDrops > seenMax && !gMaxConsecutiveDrops.compare_exchange_weak(
+                            seenMax, S.consecutiveDrops, std::memory_order_relaxed)) {
+                    }
+                    gDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
+                    advanceFrameTimer(S, nowDrop, false);
+                    return 1;
+                }
+                S.consecutiveDrops = 0;
+                return 0;   // on time (or early): never IJK's own 50 % drop while the audio timeline runs
+            }
+        }
         if (gReleaseScheduling.load(std::memory_order_acquire)
                 && (gPlaybackRateUnity.load(std::memory_order_acquire)
                         || gRateScheduling.load(std::memory_order_acquire))
@@ -3401,7 +4283,8 @@ extern "C" int observedIsNeedDropFrame(int64_t pts, void* player, void* decoder,
             const uint64_t intended = S.lastIntendedNanos.load(std::memory_order_relaxed);
             const uint64_t period = gGridPeriodNanos.load(std::memory_order_acquire);
             const uint64_t lateness = gScheduleGridMode.load(std::memory_order_acquire) == 4
-                    ? static_cast<uint64_t>(kMedia3LateDropNanos)
+                    ? static_cast<uint64_t>(
+                            gMedia3LateDropThresholdNanos.load(std::memory_order_relaxed))
                     : period * kScheduleDropLatenessPercent / 100;
             if (now <= intended + lateness) {
                 gScheduleDropsSuppressed.fetch_add(1, std::memory_order_relaxed);
@@ -3597,6 +4480,7 @@ bool hookRefreshTelemetryImports(const dl_phdr_info* info, RefreshTelemetryHookS
             return false;
         }
         if (original != nullptr) {
+            bsbRecordGotPatch(slot, replacement, original);
             if (hookKind == HookKind::kComputeTargetDelay) {
                 ComputeTargetDelay expected = nullptr;
                 gOriginalComputeTargetDelay.compare_exchange_strong(expected,
@@ -3694,7 +4578,13 @@ std::string startRefreshTelemetry(const std::string& rawSamplePath) {
                         + (rollbackOk ? "; rolled back" : "; rollback incomplete");
             }
         }
-        const bool rawSamplesActive = startRawSampleWriter(rawSamplePath);
+        for (const auto& pending : search.pending) {
+            if (pending.original != pending.replacement) {
+                bsbRecordGotPatch(pending.slot, pending.replacement, pending.original);
+            }
+        }
+        gRawSamplePath = rawSamplePath;   // opened on demand by the hidden switch
+        const bool rawSamplesActive = !rawSamplePath.empty();
         gRefreshTelemetryStarted.store(true, std::memory_order_release);
         logInfo("IJK signature GOT-only telemetry active: buildId=" + binary.buildId + " "
                 + located + "; old struct/inline probes disabled");
@@ -3735,7 +4625,9 @@ std::string startRefreshTelemetry(const std::string& rawSamplePath) {
     if (queuePictureStatus != "queue_picture probe active") {
         return "IJK refresh telemetry skipped: " + queuePictureStatus;
     }
-    const bool rawSamplesActive = startRawSampleWriter(rawSamplePath);
+    gInlineProbesActive.store(true, std::memory_order_release);   // code patches in libijkplayer: a hot reload is refused (nativeRetire)
+    gRawSamplePath = rawSamplePath;   // opened on demand by the hidden switch
+        const bool rawSamplesActive = !rawSamplePath.empty();
     gRefreshTelemetryStarted.store(true);
     logInfo("nativeTelemetryBuild=" + std::string(kTelemetryBuild)
             + " rawSamples=" + (rawSamplesActive ? "active" : "unavailable")
@@ -3753,6 +4645,72 @@ std::string startRefreshTelemetry(const std::string& rawSamplePath) {
 }
 
 }  // namespace
+
+namespace {
+struct GotPatch {
+    void** slot;
+    void* replacement;
+    void* original;
+};
+std::mutex gGotPatchMutex;
+std::vector<GotPatch> gGotPatches;
+std::atomic<bool> gNativeRetired{false};
+}  // namespace
+
+void bsbRecordGotPatch(void** slot, void* replacement, void* original) {
+    if (slot == nullptr || replacement == nullptr || original == nullptr || replacement == original) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(gGotPatchMutex);
+    for (auto& patch : gGotPatches) {
+        if (patch.slot == slot) {
+            patch.replacement = replacement;   // re-hooked: keep the first original
+            return;
+        }
+    }
+    gGotPatches.push_back({slot, replacement, original});
+}
+
+bool bsbNativeRetired() {
+    return gNativeRetired.load(std::memory_order_acquire);
+}
+
+// Hot reload, old generation: give every GOT slot this copy replaced back to what was there before, stop the scheduling and the background
+// threads.  Afterwards nothing new enters this copy (calls already inside it finish normally: the library stays mapped), and the new generation
+// installs its own copy over the original targets.  Refused, with nothing changed, while code patches (the legacy 9.5.0 inline probes) are in.
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeRetire(JNIEnv* environment, jclass) {
+    if (gInlineProbesActive.load(std::memory_order_acquire)) {
+        return environment->NewStringUTF("refused: inline probes in libijkplayer cannot be handed back");
+    }
+    gReleaseScheduling.store(false, std::memory_order_release);
+    gNativeRetired.store(true, std::memory_order_release);
+    int restored = 0;
+    int foreign = 0;
+    int failed = 0;
+    std::string detail;
+    {
+        std::lock_guard<std::mutex> lock(gGotPatchMutex);
+        for (const auto& patch : gGotPatches) {
+            if (*patch.slot != patch.replacement) {
+                ++foreign;   // someone else replaced it after us: leave it alone
+                continue;
+            }
+            std::string error;
+            if (replaceGotSlot(patch.slot, patch.original, nullptr, &error)) {
+                ++restored;
+            } else {
+                ++failed;
+                detail += " " + error;
+            }
+        }
+        gGotPatches.clear();
+    }
+    const std::string result = "retired gotRestored=" + std::to_string(restored) + " foreign=" + std::to_string(foreign)
+            + " failed=" + std::to_string(failed) + detail;
+    logInfo(result);
+    return environment->NewStringUTF(result.c_str());
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeApply4msPatch(
@@ -3985,7 +4943,7 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetReleaseScheduling(
             ? ("native release scheduling active " + std::string(gridMode == 1
                     ? "grid=arrival(vsync+p/2)" : gridMode == 2 ? "grid=deadline(latch window)"
                     : gridMode == 3 ? "grid=deadline+gl(latch window, immediate render)"
-                    : gridMode == 4 ? "grid=media3(timestamped, 45 ms early)" + swapHook
+                    : gridMode == 4 ? "grid=media3(timestamped, live poll / ready-window)" + swapHook
                     : "callLead=" + std::to_string(lead) + "%")).c_str()
             : "native release scheduling disabled");
 }
@@ -3995,6 +4953,24 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetMedia3SkipSameVsync(
         JNIEnv*, jclass, jboolean enabled) {
     gMedia3SkipSameVsync.store(enabled == JNI_TRUE, std::memory_order_relaxed);
 }
+
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetMedia3ReadyWindowMs(
+        JNIEnv*, jclass, jint ms) {
+    const int clamped = ms < 1 ? 1 : (ms > 50 ? 50 : static_cast<int>(ms));
+    gMedia3ReadyWindowNanos.store(static_cast<uint64_t>(clamped) * 1'000'000ULL,
+            std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetMedia3LateDropMs(
+        JNIEnv*, jclass, jint ms) {
+    const int clamped = ms < 1 ? 1 : (ms > 50 ? 50 : static_cast<int>(ms));
+    gMedia3LateDropThresholdNanos.store(static_cast<int64_t>(clamped) * 1'000'000LL,
+            std::memory_order_relaxed);
+}
+
 
 extern "C" JNIEXPORT void JNICALL
 Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetVsyncGrid(
@@ -4036,6 +5012,7 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeNoteDisplay(
             rememberPendingPresent(now, static_cast<uint64_t>(expected));
         }
     }
+    state->lastDisplayNanos.store(now, std::memory_order_relaxed);
     advanceFrameTimer(*state, now, true);
 }
 
@@ -4095,6 +5072,15 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSwapTimestampStatus(
             + std::to_string(gSwapsWithoutTimestamp.load())).c_str());
 }
 
+// E2: the timing of the frame released last on this thread, for the csv detail (only called while telemetry is on).
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeFrameTimingDetail(JNIEnv* environment, jclass) {
+    const std::string text = ";wakeLateNs=" + std::to_string(gTlmLastWakeLate.load(std::memory_order_relaxed))
+            + ";javaDelayNs=" + std::to_string(gTlmLastJava.load(std::memory_order_relaxed))
+            + ";stampLeadNs=" + std::to_string(gTlmLastLead.load(std::memory_order_relaxed));
+    return environment->NewStringUTF(text.c_str());
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeTakeReleaseTimestamp(JNIEnv*, jclass) {
     if (gScheduleGridMode.load(std::memory_order_acquire) != 4) {
@@ -4109,11 +5095,61 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeTakeReleaseTimestamp(JN
     }
     const uint64_t ts = state->media3PendingReleaseTsNs.exchange(0, std::memory_order_acq_rel);
     if (ts == 0) {
+        const uint64_t takeNow = monotonicNanos();
+        if (monitorEnabled(takeNow)) {
+            // bsbU:7:<us since this player's last schedule call>  -- the release found no pending timestamp: the frame goes out untimed.
+            const uint64_t lastCall = state->lastComputeCallNanos.load(std::memory_order_relaxed);
+            char uBuf[48];
+            const int ULen = std::snprintf(uBuf, sizeof(uBuf), "bsbU:7:%lld",
+                    lastCall != 0 && takeNow >= lastCall ? static_cast<long long>((takeNow - lastCall) / 1000) : -1LL);
+            if (ULen > 0 && ULen < static_cast<int>(sizeof(uBuf))) {
+                ATrace_beginSection(uBuf);
+                ATrace_endSection();
+            }
+        }
         return -1;
+    }
+    {
+        const uint64_t takeNs = monotonicNanos();
+        if (state->tlmLastScheduleNowNs != 0 && state->tlmPendingCallTimeNs != 0) {
+            noteReleaseTiming(static_cast<int64_t>(state->tlmLastScheduleNowNs) - static_cast<int64_t>(state->tlmPendingCallTimeNs),
+                    static_cast<int64_t>(takeNs) - static_cast<int64_t>(state->tlmLastScheduleNowNs),
+                    static_cast<int64_t>(ts) - static_cast<int64_t>(takeNs));
+        }
     }
     if (state->media3PendingSkip.exchange(false, std::memory_order_acq_rel)) {
         gMedia3Skipped.fetch_add(1, std::memory_order_relaxed);
         return -2;   // release without rendering
+    }
+    // Last line of defence for denser-than-panel content: never hand off sooner than P-1ms
+    // after the last actual handoff.  Covers estimator-unsynced D, same-VSync push without
+    // skip, and any schedule/take race that left a positive timestamp.  1:1 / slower content
+    // (D unknown or D >= P-1ms, and baseDelay not clearly denser) is left to the wait path.
+    if (!state->cadPendingDecision.active) {
+        uint64_t panelPeriod = gGridPeriodNanos.load(std::memory_order_acquire);
+        const uint64_t lastShown = state->media3LastShownNs;
+        const uint64_t takeNow = monotonicNanos();
+        if (panelPeriod >= kScheduleMinPeriodNanos && panelPeriod <= kScheduleMaxPeriodNanos
+                && lastShown != 0 && takeNow > lastShown) {
+            const int64_t D = state->media3PendingDisplayDurationNs;
+            const uint64_t base = state->media3PendingBaseDelayNs;
+            const bool denser = (D > 0
+                    && D < static_cast<int64_t>(panelPeriod) - kMedia3HandoffMatchBandNanos)
+                    || (base > 0 && base * 100 < panelPeriod * 85);
+            const uint64_t minGap = panelPeriod > kMedia3HandoffEarlyAllowanceNanos
+                    ? panelPeriod - kMedia3HandoffEarlyAllowanceNanos
+                    : panelPeriod;
+            if (denser && (takeNow - lastShown) < minGap) {
+                // The slot stays unconsumed, as for every skip in scheduleMedia3: commitMedia3Frame
+                // must not advance media3LastReleaseTsNs to a slot nothing was shown in, or the
+                // next frame of denser content is skipped as same-VSync and the slot stays empty.
+                state->media3PendingTsNs = state->media3LastReleaseTsNs;
+                state->media3PendingIsSkip = true;
+                gMedia3Skipped.fetch_add(1, std::memory_order_relaxed);
+                gMedia3HandoffTakeSkips.fetch_add(1, std::memory_order_relaxed);
+                return -2;
+            }
+        }
     }
     gMedia3Timestamped.fetch_add(1, std::memory_order_relaxed);
     tlsSwapTimestampNs = ts;   // consumed by IJK's eglSwapBuffers on this thread
@@ -4134,6 +5170,34 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeInvalidateFrameTimer(JN
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeNoteReleaseCall(JNIEnv*, jclass, jlong nanos) {
+    if (nanos < 0 || nanos > 1'000'000'000LL) {
+        return;
+    }
+    const int bucket = nanos < 500'000 ? 0 : nanos < 1'000'000 ? 1 : nanos < 2'000'000 ? 2 : nanos < 4'000'000 ? 3 : nanos < 8'000'000 ? 4 : 5;
+    gRelCall[bucket].fetch_add(1, std::memory_order_relaxed);
+    gRelCallSumNs.fetch_add(static_cast<uint64_t>(nanos), std::memory_order_relaxed);
+}
+
+// One released frame: how long it waited between dequeueOutputBuffer and its release (skipped frames included).  Single writer (the release thread).
+extern "C" JNIEXPORT void JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeNoteDecodeWait(JNIEnv*, jclass, jlong waitNanos) {
+    if (waitNanos < 0 || waitNanos > 2'000'000'000LL) {
+        return;
+    }
+    const uint64_t now = monotonicNanos();
+    const uint64_t at = gDecodeWaitAtNs.load(std::memory_order_acquire);
+    if (at == 0) {
+        gDecodeWaitEmaNs.store(static_cast<double>(waitNanos), std::memory_order_relaxed);
+    } else {
+        const double alpha = 1.0 - std::exp2(-static_cast<double>(now - at) / kBacklogHalfLifeNanos);
+        const double ema = gDecodeWaitEmaNs.load(std::memory_order_relaxed);
+        gDecodeWaitEmaNs.store(ema + alpha * (static_cast<double>(waitNanos) - ema), std::memory_order_relaxed);
+    }
+    gDecodeWaitAtNs.store(now, std::memory_order_release);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetPlaybackRate(
         JNIEnv*, jclass, jfloat rate) {
     const bool unity = std::isfinite(rate) && std::fabs(static_cast<double>(rate) - 1.0) < 0.01;
@@ -4142,10 +5206,66 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetPlaybackRate(
     const double previous = gPlaybackRate.exchange(value, std::memory_order_acq_rel);
     gPlaybackRateUnity.store(unity, std::memory_order_release);
     if (std::fabs(previous - value) >= 0.01) {
+        gRateChangeAtNs.store(monotonicNanos(), std::memory_order_release);   // start of the 2 s window in which the late-frame skip is allowed
+    }
+    if (value < previous - 0.01) {
+        gRateDecreaseAtNs.store(monotonicNanos(), std::memory_order_release);   // start of the post-decrease hold of the late-frame skip
+    }
+    if (std::fabs(previous - value) >= 0.01) {
         // The frame_timer mirror, ideal timeline and frame-rate estimate are meaningless
         // across any rate change.
         gRateScheduling.store(false, std::memory_order_release);
         resetAllSchedulers();
+    }
+}
+
+// Rate the scheduler paces the video on while off 1x, adjusted continuously by the A/V error
+// loop.  Unlike nativeSetPlaybackRate it never resets the schedulers: the timeline keeps running
+// and only its slope changes.
+extern "C" JNIEXPORT void JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetPlaybackRateTrim(
+        JNIEnv*, jclass, jfloat rate) {
+    if (gPlaybackRateUnity.load(std::memory_order_acquire)
+            || !std::isfinite(rate) || rate < 0.25f || rate > static_cast<float>(kMaxAudioSpeed)) {
+        return;
+    }
+    gPlaybackRate.store(static_cast<double>(rate), std::memory_order_release);
+}
+
+// One IJK position sample: the audio position (microseconds) read at `sampleNs`
+// (CLOCK_MONOTONIC) and the speed the clock runs at.
+extern "C" JNIEXPORT void JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeNoteAudioClock(
+        JNIEnv*, jclass, jlong positionUs, jlong sampleNanos, jdouble speed) {
+    if (sampleNanos <= 0 || !std::isfinite(speed) || speed <= 0.0) {
+        return;
+    }
+    const uint64_t previousNs = gAudioSampleNs.load(std::memory_order_relaxed);
+    if (previousNs != 0 && static_cast<uint64_t>(sampleNanos) > previousNs) {
+        const uint64_t gapMs = (static_cast<uint64_t>(sampleNanos) - previousNs) / 1'000'000;
+        gSampleGapBuckets[gapMs < 40 ? 0 : gapMs < 80 ? 1 : gapMs < 120 ? 2 : gapMs < 200 ? 3 : 4]
+                .fetch_add(1, std::memory_order_relaxed);
+        const double expectedNs = static_cast<double>(gAudioPosNs.load(std::memory_order_relaxed))
+                + static_cast<double>(static_cast<uint64_t>(sampleNanos) - previousNs)
+                        * gAudioSpeed.load(std::memory_order_relaxed);
+        if (std::fabs(static_cast<double>(positionUs) * 1000.0 - expectedNs) > 400e6) {
+            gSampleJumps.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    gAudioPosNs.store(static_cast<int64_t>(positionUs) * 1000, std::memory_order_release);
+    gAudioSpeed.store(speed, std::memory_order_release);
+    gAudioSampleNs.store(static_cast<uint64_t>(sampleNanos), std::memory_order_release);
+}
+
+// The frame the refresh thread just released (rendered or dropped): scheduling the next one
+// counts from its presentation time.
+extern "C" JNIEXPORT void JNICALL
+Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeSetDisplayedPts(
+        JNIEnv*, jclass, jlong presentationTimeUs) {
+    SchedulerState* state = schedForCurrentThread();
+    if (state != nullptr) {
+        state->lastDisplayedPtsNs.store(static_cast<int64_t>(presentationTimeUs) * 1000,
+                std::memory_order_release);
     }
 }
 
@@ -4167,6 +5287,27 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeReleaseSchedulingStatus
             + std::to_string(gMedia3ResetLastDiffUs.load()) + " "
             + std::to_string(gMedia3ResetLastBaseUs.load())
             + " skipped=" + std::to_string(gMedia3Skipped.load())
+            + " cadenceLock[on/locked/kept/skipped/repeats/skipSlots/relocks]=" + std::to_string(gCadenceLockEnabled.load() ? 1 : 0)
+            + "/" + std::to_string(gCadLocked.load()) + "/" + std::to_string(gCadKept.load()) + "/" + std::to_string(gCadSkipped.load())
+            + "/" + std::to_string(gCadRepeats.load()) + "/" + std::to_string(gCadSkipSlots.load()) + "/" + std::to_string(gCadRelocks.load())
+            + " cadNone[unsynced/classify/held/rhoMilli]=" + std::to_string(gCadNoneUnsynced.load()) + "/" + std::to_string(gCadNoneClassify.load())
+            + "/" + std::to_string(gCadModeHeld.load()) + "/" + std::to_string(gCadLastRhoMilli.load())
+            + " cadRelocks[stale/inactive/far/audio]=" + std::to_string(gCadRelockStale.load()) + "/" + std::to_string(gCadRelockInactive.load())
+            + "/" + std::to_string(gCadRelockFar.load()) + "/" + std::to_string(gCadRelockAudio.load())
+            + " tuning[readyMs/lateDropMs/phase]=" + std::to_string(gMedia3ReadyWindowNanos.load() / 1000000) + "/" + std::to_string(gMedia3LateDropThresholdNanos.load() / 1000000) + "/"
+            + std::to_string(gPhaseLockEnabled.load() ? 1 : 0)
+            + " relCall[<.5/<1/<2/<4/<8/more ms]=" + std::to_string(gRelCall[0].load()) + "/" + std::to_string(gRelCall[1].load()) + "/" + std::to_string(gRelCall[2].load()) + "/"
+            + std::to_string(gRelCall[3].load()) + "/" + std::to_string(gRelCall[4].load()) + "/" + std::to_string(gRelCall[5].load())
+            + " phaseLate[<.2/<1/<2/<half/<1.5P/<2P/more]=" + std::to_string(gPhaseLate[0].load()) + "/" + std::to_string(gPhaseLate[1].load()) + "/"
+            + std::to_string(gPhaseLate[2].load()) + "/" + std::to_string(gPhaseLate[3].load()) + "/" + std::to_string(gPhaseLate[4].load()) + "/"
+            + std::to_string(gPhaseLate[5].load()) + "/" + std::to_string(gPhaseLate[6].load())
+            + " phaseSlots[1/2/3/4+]=" + std::to_string(gPhaseSlotsAdvanced[0].load()) + "/" + std::to_string(gPhaseSlotsAdvanced[1].load()) + "/"
+            + std::to_string(gPhaseSlotsAdvanced[2].load()) + "/" + std::to_string(gPhaseSlotsAdvanced[3].load())
+            + " phaseLock[on/holds/reanchors]=" + std::to_string(gPhaseLockEnabled.load() ? 1 : 0) + "/" + std::to_string(gPhaseLockHolds.load())
+            + "/" + std::to_string(gPhaseLockReanchors.load())
+             + " handoffGate[holds/skips/takeSkips]=" + std::to_string(gMedia3HandoffGateHolds.load())
+            + "/" + std::to_string(gMedia3HandoffGateSkips.load())
+            + "/" + std::to_string(gMedia3HandoffTakeSkips.load())
             + " skipDecisions=" + std::to_string(gMedia3SkipDecisions.load())
             + " snapHysteresis=" + std::to_string(gMedia3SnapHysteresis.load())
             + " takeStateMismatch=" + std::to_string(gMedia3TakeStateMismatch.load())
@@ -4179,7 +5320,8 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeReleaseSchedulingStatus
             + std::to_string(gMedia3Adjusted.load()) + "/"
             + std::to_string(gMedia3AdjustmentResets.load()) + "/"
             + std::to_string(gMedia3SameVsync.load()) + "/"
-            + std::to_string(gMedia3LateReleases.load()) + " frameDurUs="
+            + std::to_string(gMedia3LateReleases.load()) + " earlyWaits=" + std::to_string(gMedia3EarlyWaits.load())
+            + " frameDurUs="
             + std::to_string(gMedia3FrameDurationNs.load() / 1000) + " compositor[grid/queries/failures]="
             + std::to_string(gCompositorGridUsed.load()) + "/"
             + std::to_string(gCompositorQueries.load()) + "/"
@@ -4198,11 +5340,39 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeReleaseSchedulingStatus
             + std::to_string(gAdaptiveLeadNanos.load() / 1000) + " adaptiveSteps="
             + std::to_string(gAdaptiveSteps.load()) + " relayVsync="
             + std::to_string(gRelayVsyncUsed.load()) + " gridMode="
-            + std::to_string(gScheduleGridMode.load()) + " fpsBypassed="
+            + std::to_string(gScheduleGridMode.load()) + " idealStepUs=" + std::to_string(gLastIdealStepNs.load() / 1000)
+            + " idealAvg=" + std::to_string(gIdealStepFromAvg.load()) + "/" + std::to_string(gIdealStepRejected.load()) + " fpsBypassed="
             + std::to_string(gScheduleFpsBypassed.load()) + " rateUnity="
             + (gPlaybackRateUnity.load() ? "1" : "0") + " rateScaled="
             + std::to_string(gScheduleRateScaled.load()) + " rateBypassed="
-            + std::to_string(gScheduleRateBypassed.load()) + " boostedThreads="
+            + std::to_string(gScheduleRateBypassed.load()) + " audioSched="
+            + std::to_string(gMedia3AudioScheduled.load()) + " audioDrops="
+            + std::to_string(gMedia3AudioDrops.load()) + " earlyAvgUs="
+            + std::to_string(gEarlyCount.load() == 0 ? 0 : gEarlySumNs.exchange(0) / 1000 / static_cast<int64_t>(gEarlyCount.exchange(0)))
+            + " earlyMinUs=" + std::to_string(gEarlyMinNs.exchange(INT64_MAX) / 1000) + " dropped="
+            + std::to_string(gDroppedBuffers.load()) + " droppedToKey="
+            + std::to_string(gDroppedToKeyframe.load()) + " forced="
+            + std::to_string(gForcedRenders.load()) + " maxConsec="
+            + std::to_string(gMaxConsecutiveDrops.exchange(0)) + tlmStatusFragment()
+            + " sampleAgeMs[<20/<40/<60/<90/<150/<400/more]="
+            + std::to_string(gSampleAgeBuckets[0].exchange(0)) + "/" + std::to_string(gSampleAgeBuckets[1].exchange(0))
+            + "/" + std::to_string(gSampleAgeBuckets[2].exchange(0)) + "/" + std::to_string(gSampleAgeBuckets[3].exchange(0))
+            + "/" + std::to_string(gSampleAgeBuckets[4].exchange(0)) + "/" + std::to_string(gSampleAgeBuckets[5].exchange(0))
+            + "/" + std::to_string(gSampleAgeBuckets[6].exchange(0)) + " sampleAgeMaxMs="
+            + std::to_string(gSampleAgeMaxNs.exchange(0) / 1'000'000) + " sampleGapMs[<40/<80/<120/<200/more]="
+            + std::to_string(gSampleGapBuckets[0].exchange(0)) + "/" + std::to_string(gSampleGapBuckets[1].exchange(0))
+            + "/" + std::to_string(gSampleGapBuckets[2].exchange(0)) + "/" + std::to_string(gSampleGapBuckets[3].exchange(0))
+            + "/" + std::to_string(gSampleGapBuckets[4].exchange(0)) + " sampleJumps="
+            + std::to_string(gSampleJumps.exchange(0)) + " sampleStale="
+            + std::to_string(gSampleStale.exchange(0)) + " schedCalls="
+            + std::to_string(gTimedCalls.exchange(0)) + " schedNsSum="
+            + std::to_string(gTimedNsSum.exchange(0)) + " schedMaxUs="
+            + std::to_string(gTimedNsMax.exchange(0) / 1000) + " callGapMs[lt1/1-3/3-6/6-12/gt12]="
+            + std::to_string(gCallGapBuckets[0].exchange(0)) + "/"
+            + std::to_string(gCallGapBuckets[1].exchange(0)) + "/"
+            + std::to_string(gCallGapBuckets[2].exchange(0)) + "/"
+            + std::to_string(gCallGapBuckets[3].exchange(0)) + "/"
+            + std::to_string(gCallGapBuckets[4].exchange(0)) + " boostedThreads="
             + std::to_string(gPipelineThreadsBoosted.load()) + " boostErrno="
             + std::to_string(gPipelineBoostErrno.load()) + " scheduled="
             + std::to_string(gScheduledFrames.load()) + " displayNotes="
@@ -4212,7 +5382,7 @@ Java_dev_xpramt_bilisurfacebridge_NativeRefreshCap_nativeReleaseSchedulingStatus
             + std::to_string(gScheduleReplacements.load()) + " late="
             + std::to_string(gScheduleLateFrames.load()) + " resyncs="
             + std::to_string(gScheduleResyncs.load()) + " clamps="
-            + std::to_string(gScheduleClamps.load()) + " corrections="
+            + std::to_string(gScheduleClamps.load()) + " livelockBreaks=" + std::to_string(gLivelockBreaks.load()) + " corrections="
             + std::to_string(gScheduleCorrections.load()) + " offsetNs="
             + std::to_string(gSchedulers[0].offsetNanos.load()) + " dropsSuppressed="
             + std::to_string(gScheduleDropsSuppressed.load()) + " idealResyncs="

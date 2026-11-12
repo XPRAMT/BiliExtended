@@ -8,7 +8,6 @@ import android.media.MediaFormat;
 import android.os.Build;
 import android.util.Log;
 
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Relays decoder-confirmed MIME from Bilibili's IJK service process to the UI process.  The
@@ -41,11 +40,20 @@ final class DecoderFormatRelay {
             return;
         }
         context = context.getApplicationContext();
+        final Context receiverContext = context;
         try {
             IntentFilter filter = new IntentFilter(ACTION_DECODER_CONFIGURED);
             BroadcastReceiver receiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context ignored, Intent intent) {
+                    if (!Generation.alive()) {
+                        try {
+                            receiverContext.unregisterReceiver(this);   // handed over: the next generation registers its own
+                        } catch (Throwable ignoredToo) {
+                            // already gone
+                        }
+                        return;
+                    }
                     String mime = intent == null ? null : intent.getStringExtra(EXTRA_MIME);
                     if (mime == null) {
                         return;
@@ -178,7 +186,7 @@ final class DecoderFormatRelay {
     private static Context currentApplicationContext() {
         try {
             Class<?> activityThread = Class.forName("android.app.ActivityThread");
-            Object application = XposedHelpers.callStaticMethod(activityThread,
+            Object application = Xp.callStaticMethod(activityThread,
                     "currentApplication");
             return application instanceof Context
                     ? ((Context) application).getApplicationContext() : null;

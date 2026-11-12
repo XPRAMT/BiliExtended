@@ -10,7 +10,6 @@ import java.nio.file.Files;
 import java.util.HashSet;
 import java.util.Set;
 
-import de.robv.android.xposed.XposedBridge;
 
 /**
  * Raises the priority of Bilibili's external-render GL thread in the main process.
@@ -48,6 +47,9 @@ final class PipelineThreadBoost {
     private static final Runnable SCAN = new Runnable() {
         @Override
         public void run() {
+            if (!Generation.alive()) {
+                return;
+            }
             boolean found = boostNamedThreads(RENDER_THREAD_NAME);
             synchronized (PipelineThreadBoost.class) {
                 if (!found && --pendingRetries > 0) {
@@ -89,10 +91,10 @@ final class PipelineThreadBoost {
             }
             try {
                 Process.setThreadPriority(tid, PIPELINE_NICE);
-                XposedBridge.log(TAG + ": boosted thread " + name + " tid=" + tid
+                Xp.log(TAG + ": boosted thread " + name + " tid=" + tid
                         + " nice=" + Process.getThreadPriority(tid));
             } catch (Throwable throwable) {
-                XposedBridge.log(TAG + ": thread boost failed " + name + " tid=" + tid + " "
+                Xp.log(TAG + ": thread boost failed " + name + " tid=" + tid + " "
                         + throwable.getClass().getSimpleName() + ": " + throwable.getMessage());
             }
         }

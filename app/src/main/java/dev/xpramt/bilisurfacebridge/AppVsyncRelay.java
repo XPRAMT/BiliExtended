@@ -9,7 +9,6 @@ import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 
-import de.robv.android.xposed.XposedBridge;
 
 /**
  * Publishes the main process's app VSync timeline to the IJK service process.
@@ -39,6 +38,10 @@ final class AppVsyncRelay {
         return "/data/user/" + userId + "/tv.danmaku.bili/files/bilisurfacebridge/" + FILE_NAME;
     }
 
+    static synchronized boolean isRunning() {
+        return running;
+    }
+
     static synchronized void start() {
         if (running) {
             return;
@@ -56,9 +59,9 @@ final class AppVsyncRelay {
             raf.close();
             running = true;
             Choreographer.getInstance().postFrameCallback(LOOP);
-            XposedBridge.log(TAG + ": app VSync relay started at " + file.getPath());
+            Xp.log(TAG + ": app VSync relay started at " + file.getPath());
         } catch (Throwable throwable) {
-            XposedBridge.log(TAG + ": app VSync relay unavailable: "
+            Xp.log(TAG + ": app VSync relay unavailable: "
                     + throwable.getClass().getSimpleName() + ": " + throwable.getMessage());
         }
     }
@@ -68,6 +71,10 @@ final class AppVsyncRelay {
 
         @Override
         public void doFrame(long frameTimeNanos) {
+            if (!Generation.alive()) {
+                running = false;   // handed over: the next generation runs its own relay
+                return;
+            }
             MappedByteBuffer out = buffer;
             if (out == null) {
                 return;

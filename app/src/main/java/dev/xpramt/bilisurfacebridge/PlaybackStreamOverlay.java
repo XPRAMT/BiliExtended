@@ -100,6 +100,27 @@ final class PlaybackStreamOverlay {
         return null;
     }
 
+    /** Hot reload, old generation (main thread): take the labels off the screen; returns the activities they were on. */
+    static java.util.List<Activity> retireForHotReload() {
+        java.util.List<Activity> activities = new java.util.ArrayList<Activity>();
+        java.util.List<java.util.Map.Entry<Activity, OutlinedTextView>> entries;
+        synchronized (OVERLAYS) {
+            entries = new java.util.ArrayList<java.util.Map.Entry<Activity, OutlinedTextView>>(OVERLAYS.entrySet());
+            OVERLAYS.clear();
+        }
+        for (java.util.Map.Entry<Activity, OutlinedTextView> entry : entries) {
+            activities.add(entry.getKey());
+            OutlinedTextView label = entry.getValue();
+            ViewParent layer = label == null ? null : label.getParent();
+            if (layer instanceof ViewGroup && ((ViewGroup) layer).getParent() instanceof ViewGroup) {
+                ((ViewGroup) ((ViewGroup) layer).getParent()).removeView((ViewGroup) layer);   // the overlay layer this class added
+            } else if (layer instanceof ViewGroup) {
+                ((ViewGroup) layer).removeView(label);
+            }
+        }
+        return activities;
+    }
+
     private static ViewGroup findPlaybackControlContainer(Activity activity) {
         int controlsId = activity.getResources().getIdentifier(
                 "control_container", "id", activity.getPackageName());
@@ -230,6 +251,9 @@ final class PlaybackStreamOverlay {
         host.postDelayed(new Runnable() {
             @Override
             public void run() {
+                if (!Generation.alive()) {
+                    return;
+                }
                 POSITION_RETRY_PENDING.remove(activity);
                 if (!activity.isFinishing() && !activity.isDestroyed()) {
                     show(activity);

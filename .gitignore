@@ -13,3 +13,18 @@ __pycache__/
 .playwright-cli/
 sites/
 AGENTS.md
+
+# Agent work files
+.claude/
+Grok*.md
+
+# Long-press speed test archive (raw traces, csv, scripts)
+test-data/
+
+# test-run exit report written on every stop
+LAST_RUN_REPORT.json
+test-data/LAST_RUN_REPORT.json
+
+docs-local/
+tools/measure/_bsb_aff.sh
+tools/measure/_bsb_cap.sh

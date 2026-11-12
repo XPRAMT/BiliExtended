@@ -27,7 +27,8 @@ import java.util.concurrent.atomic.AtomicLong;
 /** Lightweight, opt-in video-display FPS overlay for the normal Bilibili detail player. */
 final class PlaybackDebugOverlay {
     private static final int FRAME_INTERVAL_CAPACITY = 1500;
-    private static final int MINIMUM_INTERVAL_SAMPLES = 600;
+    // 100 intervals is the smallest count where the worst 1% is still a whole frame.
+    private static final int MINIMUM_INTERVAL_SAMPLES = 100;
     private static final long FRAME_INTERVAL_WINDOW_NANOS = 10_000_000_000L;
     private static final AtomicLong DISPLAYED_FRAMES = new AtomicLong();
     private static final Map<Activity, PlaybackDebugOverlay> OVERLAYS =
@@ -39,6 +40,7 @@ final class PlaybackDebugOverlay {
     private static int frameIntervalNext;
     private static int frameIntervalOldest;
     private static long previousCallbackTimeNanos;
+    private static final int TEXT_COLOR = Color.WHITE;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final OutlinedTextView label;
@@ -179,6 +181,9 @@ final class PlaybackDebugOverlay {
     private final Runnable update = new Runnable() {
         @Override
         public void run() {
+            if (!Generation.alive()) {
+                return;
+            }
             long now = SystemClock.elapsedRealtime();
             long frames = DISPLAYED_FRAMES.get();
             long elapsed = Math.max(1L, now - previousSampleTime);
@@ -187,14 +192,50 @@ final class PlaybackDebugOverlay {
             previousSampleTime = now;
             reattachIfRemoved();
             renderText();
+            // `debug.biliextended.keepalive`: 0 = never, 1 = always, unset = while the video layer updates well below the panel rate.
+            int keepAliveMode = DebugLog.readInt("debug.biliextended.keepalive", -1);
+            setKeepAlive(keepAliveMode == 1 || (keepAliveMode != 0 && lastFps > 0.5f && lastFps < KEEP_ALIVE_BELOW_FPS));
             mainHandler.postDelayed(this, 1000L);
         }
     };
 
+    // Redraws a 2 px view every vsync so SurfaceFlinger composes every frame.  Measured 2026-11-10 (4K60 at 0.25x / 0.333x, 12 interleaved rounds, both orders):
+    // slots_ok 97-100 % with it, 69-88 % without -- when the video layer updates only a few times a second the display wakes up late and the frame lands a slot off.
+    private static final float KEEP_ALIVE_BELOW_FPS = 50f;
+    private View keepAliveView;
+    private boolean keepAliveOn;
+    private boolean keepAliveFlip;
+    private final android.view.Choreographer.FrameCallback keepAliveTick = new android.view.Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            if (!keepAliveOn || keepAliveView == null || !Generation.alive()) {
+                return;
+            }
+            keepAliveFlip = !keepAliveFlip;
+            keepAliveView.setBackgroundColor(keepAliveFlip ? 0x01000000 : 0x02000000);
+            android.view.Choreographer.getInstance().postFrameCallback(this);
+        }
+    };
+
+    private void setKeepAlive(boolean on) {
+        Activity activity = activityRef.get();
+        if (on == keepAliveOn || activity == null) {
+            return;
+        }
+        keepAliveOn = on;
+        if (on) {
+            if (keepAliveView == null) {
+                keepAliveView = new View(activity);
+                activity.addContentView(keepAliveView, new FrameLayout.LayoutParams(2, 2, Gravity.BOTTOM | Gravity.END));
+            }
+            android.view.Choreographer.getInstance().postFrameCallback(keepAliveTick);
+        }
+    }
+
     private PlaybackDebugOverlay(Activity activity) {
         activityRef = new WeakReference<Activity>(activity);
         label = new OutlinedTextView(activity);
-        label.setTextColor(Color.WHITE);
+        label.setTextColor(TEXT_COLOR);
         label.setTextSize(ModulePreferences.loadOverlayTextSizeSpForHook());
         label.setOutlineWidthPx(dp(activity, 1));
         label.setGravity(Gravity.CENTER);
@@ -209,16 +250,18 @@ final class PlaybackDebugOverlay {
         activity.addContentView(label, parameters);
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             try {
-                activity.getWindow().addOnFrameMetricsAvailableListener(
-                        new Window.OnFrameMetricsAvailableListener() {
+                frameMetricsListener = new Window.OnFrameMetricsAvailableListener() {
                             @Override
                             public void onFrameMetricsAvailable(Window window, FrameMetrics metrics,
                                                                 int dropCountSinceLastInvocation) {
                                 try {
+                                    long intendedVsync = metrics.getMetric(
+                                            FrameMetrics.INTENDED_VSYNC_TIMESTAMP);
+                                    long vsync = metrics.getMetric(FrameMetrics.VSYNC_TIMESTAMP);
                                     Media3FrameSynchronizer.recordWindowFrameMetrics(
                                             System.nanoTime(),
-                                            metrics.getMetric(FrameMetrics.INTENDED_VSYNC_TIMESTAMP),
-                                            metrics.getMetric(FrameMetrics.VSYNC_TIMESTAMP),
+                                            intendedVsync,
+                                            vsync,
                                             metrics.getMetric(FrameMetrics.DEADLINE),
                                             metrics.getMetric(FrameMetrics.TOTAL_DURATION),
                                             metrics.getMetric(FrameMetrics.SWAP_BUFFERS_DURATION),
@@ -227,7 +270,9 @@ final class PlaybackDebugOverlay {
                                     // FrameMetrics can be unavailable during window teardown.
                                 }
                             }
-                        }, mainHandler);
+                        };
+                activity.getWindow().addOnFrameMetricsAvailableListener(
+                        (Window.OnFrameMetricsAvailableListener) frameMetricsListener, mainHandler);
                 Media3FrameSynchronizer.recordWindowFrameMetricsListenerState("REGISTERED");
             } catch (Throwable exception) {
                 Media3FrameSynchronizer.recordWindowFrameMetricsListenerState(
@@ -239,6 +284,7 @@ final class PlaybackDebugOverlay {
         applyState();
         mainHandler.postDelayed(update, 1000L);
     }
+
 
     private static String callbackOnePercentLowText() {
         synchronized (FRAME_TIMING_LOCK) {
@@ -280,6 +326,7 @@ final class PlaybackDebugOverlay {
                     FRAME_INTERVAL_END_NANOS[frameIntervalNext] = now;
                     frameIntervalNext = (frameIntervalNext + 1) % FRAME_INTERVAL_CAPACITY;
                     ++frameIntervalCount;
+                    refreshAll();
                 }
             }
             previousCallbackTimeNanos = now;
@@ -301,6 +348,44 @@ final class PlaybackDebugOverlay {
                         > FRAME_INTERVAL_WINDOW_NANOS) {
             frameIntervalOldest = (frameIntervalOldest + 1) % FRAME_INTERVAL_CAPACITY;
             --frameIntervalCount;
+        }
+    }
+
+    private Object frameMetricsListener;
+
+    /** Hot reload, old generation (main thread): take the overlays off the screen; returns the activities they were on. */
+    static java.util.List<Activity> retireForHotReload() {
+        java.util.List<Activity> activities = new java.util.ArrayList<Activity>();
+        java.util.List<Map.Entry<Activity, PlaybackDebugOverlay>> entries;
+        synchronized (OVERLAYS) {
+            entries = new java.util.ArrayList<Map.Entry<Activity, PlaybackDebugOverlay>>(OVERLAYS.entrySet());
+            OVERLAYS.clear();
+        }
+        for (Map.Entry<Activity, PlaybackDebugOverlay> entry : entries) {
+            activities.add(entry.getKey());
+            entry.getValue().detach();
+        }
+        return activities;
+    }
+
+    private void detach() {
+        mainHandler.removeCallbacks(update);
+        keepAliveOn = false;
+        removeFromParent(label);
+        removeFromParent(keepAliveView);
+        Activity activity = activityRef.get();
+        if (activity != null && frameMetricsListener != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            try {
+                activity.getWindow().removeOnFrameMetricsAvailableListener((Window.OnFrameMetricsAvailableListener) frameMetricsListener);
+            } catch (Throwable ignored) {
+                // the window is gone
+            }
+        }
+    }
+
+    private static void removeFromParent(View view) {
+        if (view != null && view.getParent() instanceof ViewGroup) {
+            ((ViewGroup) view.getParent()).removeView(view);
         }
     }
 
@@ -336,7 +421,11 @@ final class PlaybackDebugOverlay {
                         renderCadenceProbeEnabled
                                 ? RenderCadenceProbe.beginDisplayCallback() : null;
                 try {
-                    recordFrameCallback();
+                    // Native Media3 scheduling records from non-skip release only; skipped
+                    // frames may still reach onVideoDisplay and must not enter interval samples.
+                    if (Media3FrameSynchronizer.overlayShouldCountVideoDisplayCallback()) {
+                        recordFrameCallback();
+                    }
                     if (delegate == null) {
                         return 0;
                     }

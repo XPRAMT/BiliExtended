@@ -84,6 +84,32 @@ final class NativeRefreshCap {
         }
     }
 
+    /** Raises Bilibili's IJK maximum playback rate to {@code limit}; see speed_cap_lift.cpp. */
+    static synchronized String installSpeedCapLift(float limit) {
+        String loadResult = ensureLoaded();
+        if (loadResult != null) {
+            return loadResult;
+        }
+        try {
+            return nativeInstallSpeedCapLift(limit);
+        } catch (Throwable throwable) {
+            return "speed cap lift unavailable=" + throwable.getClass().getSimpleName();
+        }
+    }
+
+    /**
+     * The maximum playback rate IJK's ffp_set_playback_rate saw on its last call, or 0 when unknown (lift not installed, no call yet).
+     * IJK stores min(request, this) as the playback rate (libijkplayer 9.13.0 / 9.17.0, 0x334 in the ffp struct), so the rate that really
+     * runs is known from the request alone; no need to measure it from the audio clock.
+     */
+    static float observedMaxRate() {
+        try {
+            return nativeObservedMaxRate();
+        } catch (Throwable throwable) {
+            return 0.0f;
+        }
+    }
+
     static synchronized String patchPictureQueueRange(double newMin) {
         String loadResult = ensureLoaded();
         if (loadResult != null) {
@@ -115,6 +141,47 @@ final class NativeRefreshCap {
         } catch (Throwable throwable) {
             return "native release scheduling unavailable="
                     + throwable.getClass().getSimpleName();
+        }
+    }
+
+
+    /** Live ready-window / tooEarly gate (ms); clamps 1–50. */
+    static synchronized void setMedia3ReadyWindowMs(int ms) {
+        if (ensureLoaded() != null) {
+            return;
+        }
+        try {
+            nativeSetMedia3ReadyWindowMs(ms);
+        } catch (Throwable ignored) {
+            // Older native library.
+        }
+    }
+
+    /** Live late-frame skip threshold behind audio (ms); clamps 1–50. */
+    static synchronized void setMedia3LateDropMs(int ms) {
+        if (ensureLoaded() != null) {
+            return;
+        }
+        try {
+            nativeSetMedia3LateDropMs(ms);
+        } catch (Throwable ignored) {
+            // Older native library.
+        }
+    }
+
+    /** Push schedule ms prefs currently visible to the hook into native. */
+    private static String lastTuning = "";
+
+    static void applyScheduleTuningFromPreferences() {
+        final int ready = ModulePreferences.loadMedia3ReadyWindowMsForHook();
+        final int lateDrop = ModulePreferences.loadMedia3LateDropMsForHook();
+        setMedia3ReadyWindowMs(ready);
+        setMedia3LateDropMs(lateDrop);
+        // What the user's settings (or their defaults) were when pushed to native: logged whenever it changes, so "is the slider really used" can be read from the log.
+        final String now = ready + "/" + lateDrop;
+        if (!now.equals(lastTuning)) {
+            lastTuning = now;
+            Xp.log("BiliExtended: schedule tuning pushed to native readyMs/lateDropMs=" + now);
         }
     }
 
@@ -151,6 +218,66 @@ final class NativeRefreshCap {
             nativeSetVsyncGrid(anchorNanos, periodNanos, vsyncNanos, deadlineNanos);
         } catch (Throwable ignored) {
             // The scheduler falls back to IJK's own delay when the grid goes stale.
+        }
+    }
+
+    /** One released frame: nanoseconds between dequeueOutputBuffer and the release (the decoded-frame backlog signal of the late-frame skip). */
+    static void noteDecodeWait(long waitNanos) {
+        if (loadFailure != null || !loadAttempted) {
+            return;
+        }
+        try {
+            nativeNoteDecodeWait(waitNanos);
+        } catch (Throwable ignored) {
+            // Feedback only.
+        }
+    }
+
+    /** How long MediaCodec.releaseOutputBuffer blocked the IJK refresh thread (a binder call into the codec service); bucketed in the native status line. */
+    static void noteReleaseCall(long nanos) {
+        if (loadFailure != null || !loadAttempted) {
+            return;
+        }
+        try {
+            nativeNoteReleaseCall(nanos);
+        } catch (Throwable ignored) {
+            // Feedback only.
+        }
+    }
+
+    /** E2 telemetry: the timing of the frame released last (wake-up lateness, Java delay, stamp lead) as a csv detail fragment; empty when unavailable. */
+    static String frameTimingDetail() {
+        if (loadFailure != null || !loadAttempted) {
+            return "";
+        }
+        try {
+            return nativeFrameTimingDetail();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    /** One IJK position sample: audio position (microseconds), its time, the clock's speed. */
+    static void noteAudioClock(long positionUs, long sampleNanos, double speed) {
+        if (loadFailure != null || !loadAttempted) {
+            return;
+        }
+        try {
+            nativeNoteAudioClock(positionUs, sampleNanos, speed);
+        } catch (Throwable ignored) {
+            // Feedback only.
+        }
+    }
+
+    /** The frame released last (on the IJK refresh thread, before noteDisplay). */
+    static void setDisplayedPts(long presentationTimeUs) {
+        if (loadFailure != null || !loadAttempted) {
+            return;
+        }
+        try {
+            nativeSetDisplayedPts(presentationTimeUs);
+        } catch (Throwable ignored) {
+            // Feedback only.
         }
     }
 
@@ -271,6 +398,18 @@ final class NativeRefreshCap {
         }
     }
 
+    /** Slope of the off-1x video timeline; keeps the schedulers running (no reset). */
+    static void setPlaybackRateTrim(float rate) {
+        if (loadFailure != null || !loadAttempted) {
+            return;
+        }
+        try {
+            nativeSetPlaybackRateTrim(rate);
+        } catch (Throwable ignored) {
+            // Nothing to recover.
+        }
+    }
+
     static void invalidateFrameTimer() {
         if (loadFailure != null || !loadAttempted) {
             return;
@@ -294,6 +433,26 @@ final class NativeRefreshCap {
         }
     }
 
+    /**
+     * Hot reload, old generation: gives back every GOT slot this copy of the library replaced and stops its threads (nativeRetire).  "not loaded"
+     * when this process never loaded it; a result starting with "refused" means the reload must be declined.
+     */
+    static synchronized String retireIfLoaded() {
+        if (!loadAttempted) {
+            return "not loaded";
+        }
+        if (loadFailure != null) {
+            return "not loaded (" + loadFailure + ")";
+        }
+        try {
+            return nativeRetire();
+        } catch (Throwable throwable) {
+            return "refused: nativeRetire unavailable=" + throwable.getClass().getSimpleName();
+        }
+    }
+
+    private static native String nativeRetire();
+
     private static String ensureLoaded() {
         if (!loadAttempted) {
             loadAttempted = true;
@@ -308,6 +467,10 @@ final class NativeRefreshCap {
         }
         return null;
     }
+
+    private static native String nativeInstallSpeedCapLift(float limit);
+
+    private static native float nativeObservedMaxRate();
 
     private static native String nativeApply4msPatch();
 
@@ -333,13 +496,29 @@ final class NativeRefreshCap {
 
     private static native void nativeNoteDisplay(long nowNanos);
 
+    private static native void nativeNoteAudioClock(long positionUs, long sampleNanos,
+                                                    double speed);
+
+    private static native void nativeNoteDecodeWait(long waitNanos);
+    private static native void nativeNoteReleaseCall(long nanos);
+
+    private static native void nativeSetDisplayedPts(long presentationTimeUs);
+
     private static native void nativeInvalidateFrameTimer();
 
+    private static native String nativeFrameTimingDetail();
+
     private static native void nativeSetPlaybackRate(float rate);
+
+    private static native void nativeSetPlaybackRateTrim(float rate);
 
     private static native void nativeNotePresent(long presentNanos);
 
     private static native long nativeTakeReleaseTimestamp();
+
+    private static native void nativeSetMedia3ReadyWindowMs(int ms);
+
+    private static native void nativeSetMedia3LateDropMs(int ms);
 
     private static native void nativeSetMedia3SkipSameVsync(boolean enabled);
 

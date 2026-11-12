@@ -8,9 +8,6 @@ import android.opengl.EGLSurface;
 
 import java.util.concurrent.atomic.AtomicLong;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Carries the Media3 release timestamp through Bilibili's external renderer (Surface external).
@@ -52,10 +49,10 @@ final class ExternalRenderTimestamps {
         }
         StringBuilder result = new StringBuilder("external render timestamps:");
         try {
-            XposedHelpers.findAndHookMethod(SurfaceTexture.class, "updateTexImage",
-                    new XC_MethodHook() {
+            Xp.findAndHookMethod(SurfaceTexture.class, "updateTexImage",
+                    new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             onUpdateTexImage((SurfaceTexture) param.thisObject);
                         }
                     });
@@ -64,10 +61,10 @@ final class ExternalRenderTimestamps {
             result.append(" updateTexImage-unavailable=").append(throwable.getClass().getSimpleName());
         }
         try {
-            XposedHelpers.findAndHookMethod(EGL14.class, "eglSwapBuffers", EGLDisplay.class,
-                    EGLSurface.class, new XC_MethodHook() {
+            Xp.findAndHookMethod(EGL14.class, "eglSwapBuffers", EGLDisplay.class,
+                    EGLSurface.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             onJavaSwap((EGLDisplay) param.args[0], (EGLSurface) param.args[1]);
                         }
                     });
@@ -80,10 +77,10 @@ final class ExternalRenderTimestamps {
         // time call, but the surface being swapped is current, so EGL14's current display and
         // draw surface name the same native objects.
         try {
-            Class<?> eglImpl = XposedHelpers.findClass("com.google.android.gles_jni.EGLImpl", null);
-            int hooked = XposedBridge.hookAllMethods(eglImpl, "eglSwapBuffers", new XC_MethodHook() {
+            Class<?> eglImpl = Xp.findClass("com.google.android.gles_jni.EGLImpl", null);
+            int hooked = Xp.hookAllMethods(eglImpl, "eglSwapBuffers", new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     onEgl10Swap();
                 }
             }).size();
@@ -99,7 +96,7 @@ final class ExternalRenderTimestamps {
     private static long plainSwaps;
 
     private static void traceEvent(String name, long value) {
-        if (!ModulePreferences.loadPlaybackDebugOverlayForHook()) {
+        if (!DebugLog.enabled()) {
             return;
         }
         try {
@@ -110,11 +107,11 @@ final class ExternalRenderTimestamps {
     }
 
     /**
-     * Per-swap trace counters (only while the debug overlay is on, i.e. during measurement):
+     * Per-swap trace counters (only while the hidden DebugLog switch is on):
      * how far ahead the presentation time is at the swap, and the step from the previous one.
      */
     private static void traceSwap(long timestampNs) {
-        if (!ModulePreferences.loadPlaybackDebugOverlayForHook()) {
+        if (!DebugLog.enabled()) {
             return;
         }
         try {
@@ -157,10 +154,10 @@ final class ExternalRenderTimestamps {
         // Native swaps (IJK's own GL code) consume the same value through the GOT hook.
         long armed = ARMED.getAndIncrement();
         if (armed == 0L) {
-            XposedBridge.log(TAG + ": external render timestamps armed; "
+            Xp.log(TAG + ": external render timestamps armed; "
                     + NativeRefreshCap.installSwapTimestampHook());
         } else if (armed % 3600L == 0L) {
-            XposedBridge.log(TAG + ": external render timestamps armed=" + armed + " javaSwaps="
+            Xp.log(TAG + ": external render timestamps armed=" + armed + " javaSwaps="
                     + JAVA_SWAPS.get() + " native " + NativeRefreshCap.swapTimestampStatus());
         }
         NativeRefreshCap.armSwapTimestamp(timestampNs);
@@ -198,10 +195,10 @@ final class ExternalRenderTimestamps {
             traceSwap(timestampNs);
             long swaps = JAVA_SWAPS.incrementAndGet();
             if (swaps == 1L || swaps % 3600L == 0L) {
-                XposedBridge.log(TAG + ": external render swap timestamps=" + swaps);
+                Xp.log(TAG + ": external render swap timestamps=" + swaps);
             }
         } catch (Throwable throwable) {
-            XposedBridge.log(TAG + ": eglPresentationTimeANDROID failed: "
+            Xp.log(TAG + ": eglPresentationTimeANDROID failed: "
                     + throwable.getClass().getSimpleName());
         }
     }

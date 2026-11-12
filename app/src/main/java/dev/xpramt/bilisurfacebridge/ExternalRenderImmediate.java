@@ -9,9 +9,6 @@ import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Makes Bilibili's external renderer draw a video frame as soon as it arrives instead of on
@@ -57,17 +54,17 @@ final class ExternalRenderImmediate {
             return "external render immediate already installed";
         }
         try {
-            XposedHelpers.findAndHookMethod(Choreographer.class, "postFrameCallback",
-                    Choreographer.FrameCallback.class, new XC_MethodHook() {
+            Xp.findAndHookMethod(Choreographer.class, "postFrameCallback",
+                    Choreographer.FrameCallback.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             runNow(param);
                         }
                     });
-            XposedHelpers.findAndHookMethod(Choreographer.class, "postFrameCallbackDelayed",
-                    Choreographer.FrameCallback.class, long.class, new XC_MethodHook() {
+            Xp.findAndHookMethod(Choreographer.class, "postFrameCallbackDelayed",
+                    Choreographer.FrameCallback.class, long.class, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (((Long) param.args[1]).longValue() <= 0L) {
                                 runNow(param);
                             }
@@ -87,9 +84,9 @@ final class ExternalRenderImmediate {
      * composes (Surface external); its compositor timing is relayed to the scheduler.
      */
     private static void installCompositorSurfaceCapture() {
-        XC_MethodHook capture = new XC_MethodHook() {
+        Xp.Hook capture = new Xp.Hook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
+            protected void after(Xp.Param param) {
                 if (!RENDER_THREAD_NAME.equals(Thread.currentThread().getName())) {
                     return;
                 }
@@ -98,26 +95,43 @@ final class ExternalRenderImmediate {
                     return;
                 }
                 NativeRefreshCap.load();
-                XposedBridge.log(TAG + ": compositor surface captured from "
+                compositorSurface = new java.lang.ref.WeakReference<android.view.Surface>(surface);
+                Xp.log(TAG + ": compositor surface captured from "
                         + param.args[2].getClass().getName() + ": "
                         + NativeRefreshCap.setCompositorWindow(surface));
             }
         };
         try {
-            XposedHelpers.findAndHookMethod(android.opengl.EGL14.class, "eglCreateWindowSurface",
+            Xp.findAndHookMethod(android.opengl.EGL14.class, "eglCreateWindowSurface",
                     android.opengl.EGLDisplay.class, android.opengl.EGLConfig.class, Object.class,
                     int[].class, int.class, capture);
         } catch (Throwable throwable) {
-            XposedBridge.log(TAG + ": EGL14 window hook unavailable: "
+            Xp.log(TAG + ": EGL14 window hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         try {
-            Class<?> eglImpl = XposedHelpers.findClass("com.google.android.gles_jni.EGLImpl", null);
-            XposedBridge.hookAllMethods(eglImpl, "eglCreateWindowSurface", capture);
+            Class<?> eglImpl = Xp.findClass("com.google.android.gles_jni.EGLImpl", null);
+            Xp.hookAllMethods(eglImpl, "eglCreateWindowSurface", capture);
         } catch (Throwable throwable) {
-            XposedBridge.log(TAG + ": EGL10 window hook unavailable: "
+            Xp.log(TAG + ": EGL10 window hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
+    }
+
+    /** The GL thread's window surface captured last: it is created once per player, so a hot-reloaded generation gets it handed over. */
+    private static java.lang.ref.WeakReference<android.view.Surface> compositorSurface;
+
+    static android.view.Surface exportForHotReload() {
+        return compositorSurface == null ? null : compositorSurface.get();
+    }
+
+    static String adoptAfterHotReload(Object surface) {
+        if (!(surface instanceof android.view.Surface) || !((android.view.Surface) surface).isValid()) {
+            return "no compositor surface";
+        }
+        compositorSurface = new java.lang.ref.WeakReference<android.view.Surface>((android.view.Surface) surface);
+        NativeRefreshCap.load();
+        return NativeRefreshCap.setCompositorWindow((android.view.Surface) surface);
     }
 
     private static android.view.Surface surfaceOf(Object window) {
@@ -140,14 +154,14 @@ final class ExternalRenderImmediate {
             return handler;
         }
         try {
-            Looper looper = (Looper) XposedHelpers.getObjectField(choreographer, "mLooper");
+            Looper looper = (Looper) Xp.getObjectField(choreographer, "mLooper");
             if (looper == null || looper.getThread() == null
                     || !RENDER_THREAD_NAME.equals(looper.getThread().getName())) {
                 return null;
             }
             handler = new Handler(looper);
             RENDER_HANDLERS.put(choreographer, handler);
-            XposedBridge.log(TAG + ": external render immediate bound to "
+            Xp.log(TAG + ": external render immediate bound to "
                     + looper.getThread().getName() + " from "
                     + Thread.currentThread().getName());
             return handler;
@@ -164,7 +178,7 @@ final class ExternalRenderImmediate {
         return ++windowCount <= MAX_IMMEDIATE_PER_WINDOW;
     }
 
-    private static void runNow(XC_MethodHook.MethodHookParam param) {
+    private static void runNow(Xp.Param param) {
         // Both external renderers draw on arrival: the GL output phase is then set by the
         // native release scheduling instead of by whichever app VSync follows the arrival
         // (which breaks down when the app VSync rate and the display rate differ, e.g. 60 fps
@@ -197,7 +211,7 @@ final class ExternalRenderImmediate {
                 try {
                     callback.doFrame(System.nanoTime());
                 } catch (Throwable throwable) {
-                    XposedBridge.log(TAG + ": immediate external render failed: "
+                    Xp.log(TAG + ": immediate external render failed: "
                             + throwable.getClass().getSimpleName() + ": "
                             + throwable.getMessage());
                 }
@@ -205,7 +219,7 @@ final class ExternalRenderImmediate {
         });
         long frames = IMMEDIATE_FRAMES.incrementAndGet();
         if (frames == 1L || frames % 3600L == 0L) {
-            XposedBridge.log(TAG + ": external render immediate frames=" + frames
+            Xp.log(TAG + ": external render immediate frames=" + frames
                     + " rateGuarded=" + GUARDED_FRAMES.get());
         }
         param.setResult(null);

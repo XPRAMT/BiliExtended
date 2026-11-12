@@ -32,9 +32,6 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.HashSet;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Runtime-only Media3 proof of concept for the official Bilibili player.
@@ -97,10 +94,10 @@ final class Media3MinimalPlayerBridge {
         }
         try {
             targetClassLoader = classLoader;
-            final Class<?> playerClass = XposedHelpers.findClass(IJK_PLAYER, classLoader);
-            final Class<?> itemClass = XposedHelpers.findClass(IJK_ITEM, classLoader);
-            final Class<?> assetClass = XposedHelpers.findClass(IJK_ASSET, classLoader);
-            final Class<?> configClass = XposedHelpers.findClass(IJK_CONFIG, classLoader);
+            final Class<?> playerClass = Xp.findClass(IJK_PLAYER, classLoader);
+            final Class<?> itemClass = Xp.findClass(IJK_ITEM, classLoader);
+            final Class<?> assetClass = Xp.findClass(IJK_ASSET, classLoader);
+            final Class<?> configClass = Xp.findClass(IJK_CONFIG, classLoader);
 
             installLiveQualitySelectionHook(classLoader);
             boolean itemInitHooked = installSourceCapture(itemClass, assetClass, configClass);
@@ -144,10 +141,10 @@ final class Media3MinimalPlayerBridge {
         try {
             targetClassLoader = classLoader;
             installLiveQualitySelectionHook(classLoader);
-            Class<?> itemClass = XposedHelpers.findClass(IJK_ITEM, classLoader);
-            Class<?> assetClass = XposedHelpers.findClass(IJK_ASSET, classLoader);
-            Class<?> configClass = XposedHelpers.findClass(IJK_CONFIG, classLoader);
-            Class<?> playerClass = XposedHelpers.findClass(IJK_PLAYER, classLoader);
+            Class<?> itemClass = Xp.findClass(IJK_ITEM, classLoader);
+            Class<?> assetClass = Xp.findClass(IJK_ASSET, classLoader);
+            Class<?> configClass = Xp.findClass(IJK_CONFIG, classLoader);
+            Class<?> playerClass = Xp.findClass(IJK_PLAYER, classLoader);
             installTrackSwitchHooks(playerClass);
             installDecoderInfoProbe(playerClass, true);
             return installSourceCapture(itemClass, assetClass, configClass)
@@ -181,10 +178,10 @@ final class Media3MinimalPlayerBridge {
             return;
         }
         try {
-            Class<?> selectorClass = XposedHelpers.findClass(
+            Class<?> selectorClass = Xp.findClass(
                     LIVE_P0_PLAY_URL_SELECTOR, classLoader);
-            Class<?> playUrlClass = XposedHelpers.findClass(LIVE_PLAY_URL_V2, classLoader);
-            Class<?> roomQnClass = XposedHelpers.findClass(LIVE_ROOM_QN, classLoader);
+            Class<?> playUrlClass = Xp.findClass(LIVE_PLAY_URL_V2, classLoader);
+            Class<?> roomQnClass = Xp.findClass(LIVE_ROOM_QN, classLoader);
             int hooked = 0;
             for (final Method method : allMethods(selectorClass)) {
                 Class<?>[] parameterTypes = method.getParameterTypes();
@@ -213,16 +210,16 @@ final class Media3MinimalPlayerBridge {
                 final int roomQnArgument = current ? 3 : 2;
                 try {
                     method.setAccessible(true);
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (ModulePreferences.loadAutoSelectBestAudioForHook()) {
                                 adjustLiveQualityArgument(param, roomQnArgument);
                             }
                         }
 
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             reportLiveQualityResult(param);
                         }
                     });
@@ -246,7 +243,7 @@ final class Media3MinimalPlayerBridge {
         }
     }
 
-    private static void adjustLiveQualityArgument(XC_MethodHook.MethodHookParam param,
+    private static void adjustLiveQualityArgument(Xp.Param param,
                                                   int roomQnArgument) {
         try {
             Object playUrls = param.args == null || param.args.length == 0
@@ -289,7 +286,7 @@ final class Media3MinimalPlayerBridge {
         }
     }
 
-    private static void reportLiveQualityResult(XC_MethodHook.MethodHookParam param) {
+    private static void reportLiveQualityResult(Xp.Param param) {
         try {
             Object result = param.getResult();
             Object qnInfo = result == null ? null : invoke(result, "getQnInfo");
@@ -550,9 +547,9 @@ final class Media3MinimalPlayerBridge {
                 continue;
             }
             try {
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                Xp.hookMethod(method, new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         Object asset = findAssetArgument(param.args, assetClass);
                         if (ModulePreferences.loadAutoSelectBestAudioForHook()) {
                             preferHighestBandwidthAudio(asset);
@@ -563,7 +560,7 @@ final class Media3MinimalPlayerBridge {
                     }
 
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    protected void after(Xp.Param param) {
                         Object asset = findAssetArgument(param.args, assetClass);
                         SourcePair pair = extractSourcePair(asset);
                         if (pair != null && pair.hasVideo()) {
@@ -604,9 +601,9 @@ final class Media3MinimalPlayerBridge {
             if ("getMediaInfo".equals(method.getName())
                     && method.getParameterTypes().length == 0) {
                 try {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             if (!param.hasThrowable() && param.getResult() != null) {
                                 inspectActualAudioDecoder(param.thisObject, param.getResult());
                             }
@@ -620,9 +617,9 @@ final class Media3MinimalPlayerBridge {
             } else if (scheduleAfterStart && "start".equals(method.getName())
                     && method.getParameterTypes().length == 0) {
                 try {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(final MethodHookParam param) {
+                        protected void after(final Xp.Param param) {
                             scheduleActualAudioDecoderProbe(param.thisObject);
                         }
                     });
@@ -877,9 +874,9 @@ final class Media3MinimalPlayerBridge {
                 continue;
             }
             try {
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                Xp.hookMethod(method, new Xp.Hook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    protected void after(Xp.Param param) {
                         // A failed switch call does not establish that IJK actually changed its
                         // active stream.  Keep the existing label rather than reporting the
                         // requested track as if it had become the decoder input.
@@ -928,9 +925,9 @@ final class Media3MinimalPlayerBridge {
                 continue;
             }
             try {
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                Xp.hookMethod(method, new Xp.Hook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    protected void after(Xp.Param param) {
                         PlayerState state = stateFor(param.thisObject);
                         state.item = param.args[0];
                         state.sources = SOURCES_BY_ITEM.get(param.args[0]);
@@ -966,9 +963,9 @@ final class Media3MinimalPlayerBridge {
                 continue;
             }
             try {
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                Xp.hookMethod(method, new Xp.Hook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    protected void before(Xp.Param param) {
                         PlayerState state = stateFor(param.thisObject);
                         state.surface = (Surface) param.args[0];
                         attachSurface(state);
@@ -994,9 +991,9 @@ final class Media3MinimalPlayerBridge {
                 continue;
             }
             try {
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                Xp.hookMethod(method, new Xp.Hook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    protected void after(Xp.Param param) {
                         PlayerState state = stateFor(param.thisObject);
                         Object callback = readVideoDisplayCallback(param.thisObject);
                         if (callback == null && param.args != null && param.args.length > 0) {
@@ -1026,18 +1023,18 @@ final class Media3MinimalPlayerBridge {
             }
             try {
                 if ("start".equals(name)) {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             if (startMedia3(stateFor(param.thisObject))) {
                                 param.setResult(null);
                             }
                         }
                     });
                 } else if ("pause".equals(name)) {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             PlayerState state = stateFor(param.thisObject);
                             if (state.media3Player != null
                                     && setPlayWhenReady(state.media3Player, false)) {
@@ -1046,9 +1043,9 @@ final class Media3MinimalPlayerBridge {
                         }
                     });
                 } else {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             PlayerState state = stateFor(param.thisObject);
                             releaseMedia3(state);
                             STATES.remove(param.thisObject);
@@ -1114,10 +1111,10 @@ final class Media3MinimalPlayerBridge {
 
     private static void tryHookSetDisplay(Class<?> playerClass) {
         try {
-            XposedHelpers.findAndHookMethod(playerClass, "setDisplay", SurfaceHolder.class,
-                    new XC_MethodHook() {
+            Xp.findAndHookMethod(playerClass, "setDisplay", SurfaceHolder.class,
+                    new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             PlayerState state = stateFor(param.thisObject);
                             SurfaceHolder holder = (SurfaceHolder) param.args[0];
                             state.surface = holder == null ? null : holder.getSurface();
@@ -1132,9 +1129,9 @@ final class Media3MinimalPlayerBridge {
 
     private static void hookItemStart(Class<?> itemClass) {
         try {
-            XposedHelpers.findAndHookMethod(itemClass, "start", new XC_MethodHook() {
+            Xp.findAndHookMethod(itemClass, "start", new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     PlayerState state = stateForItem(param.thisObject);
                     if (state != null && startMedia3(state)) {
                         param.setResult(null);
@@ -2490,7 +2487,7 @@ final class Media3MinimalPlayerBridge {
      * account data.  This distinguishes a new IJK asset from a successful in-place track switch.
      */
     private static void logTrackSwitch(String outcome, boolean audio,
-                                       XC_MethodHook.MethodHookParam param, int qualityId) {
+                                       Xp.Param param, int qualityId) {
         String label;
         synchronized (TRACK_SELECTION_LOCK) {
             label = audio ? AUDIO_LABELS_BY_ID.get(qualityId) : VIDEO_LABELS_BY_ID.get(qualityId);
@@ -2623,7 +2620,7 @@ final class Media3MinimalPlayerBridge {
     private static void logOnce(String key, String message) {
         if (REPORTED.add(key)) {
             String line = "[minimal-media3] " + message;
-            XposedBridge.log(TAG + ": " + line);
+            Xp.log(TAG + ": " + line);
             Log.i(TAG, line);
         }
     }

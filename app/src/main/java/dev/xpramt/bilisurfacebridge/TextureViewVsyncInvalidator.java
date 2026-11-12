@@ -9,9 +9,6 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Redraws Bilibili's video TextureView on every UI VSync while it is attached.
@@ -41,18 +38,18 @@ final class TextureViewVsyncInvalidator {
             return "TextureView VSync invalidator already installed";
         }
         try {
-            XposedHelpers.findAndHookMethod(TextureView.class, "onAttachedToWindow",
-                    new XC_MethodHook() {
+            Xp.findAndHookMethod(TextureView.class, "onAttachedToWindow",
+                    new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             start((TextureView) param.thisObject);
                         }
                     });
             // TextureView overrides the hidden onDetachedFromWindowInternal(), not
             // onDetachedFromWindow(); hook it, falling back to View with a type filter.
-            XC_MethodHook detach = new XC_MethodHook() {
+            Xp.Hook detach = new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     if (param.thisObject instanceof TextureView) {
                         stop((TextureView) param.thisObject);
                     }
@@ -60,11 +57,11 @@ final class TextureViewVsyncInvalidator {
             };
             String detachHook;
             try {
-                XposedHelpers.findAndHookMethod(TextureView.class,
+                Xp.findAndHookMethod(TextureView.class,
                         "onDetachedFromWindowInternal", detach);
                 detachHook = "TextureView.onDetachedFromWindowInternal";
             } catch (NoSuchMethodError missing) {
-                XposedHelpers.findAndHookMethod(android.view.View.class,
+                Xp.findAndHookMethod(android.view.View.class,
                         "onDetachedFromWindow", detach);
                 detachHook = "View.onDetachedFromWindow";
             }
@@ -97,7 +94,7 @@ final class TextureViewVsyncInvalidator {
         Choreographer.FrameCallback loop = new Choreographer.FrameCallback() {
             @Override
             public void doFrame(long frameTimeNanos) {
-                if (LOOPS.get(view) != this || !view.isAttachedToWindow()) {
+                if (!Generation.alive() || LOOPS.get(view) != this || !view.isAttachedToWindow()) {
                     return;
                 }
                 view.invalidate();
@@ -106,13 +103,31 @@ final class TextureViewVsyncInvalidator {
         };
         LOOPS.put(view, loop);
         Choreographer.getInstance().postFrameCallback(loop);
-        XposedBridge.log(TAG + ": TextureView VSync invalidator started for "
+        Xp.log(TAG + ": TextureView VSync invalidator started for "
                 + view.getClass().getName() + " in " + parentName(view));
+    }
+
+    /** Hot reload: the TextureViews being redrawn now (framework objects). */
+    static java.util.List<TextureView> exportForHotReload() {
+        synchronized (LOOPS) {
+            return new java.util.ArrayList<TextureView>(LOOPS.keySet());
+        }
+    }
+
+    /** Hot reload, new generation (main thread): redraw the handed-over views again. */
+    static void adoptAfterHotReload(Object views) {
+        if (views instanceof java.util.List) {
+            for (Object view : (java.util.List<?>) views) {
+                if (view instanceof TextureView && ((TextureView) view).isAttachedToWindow()) {
+                    start((TextureView) view);
+                }
+            }
+        }
     }
 
     private static void stop(TextureView view) {
         if (LOOPS.remove(view) != null) {
-            XposedBridge.log(TAG + ": TextureView VSync invalidator stopped");
+            Xp.log(TAG + ": TextureView VSync invalidator stopped");
         }
     }
 

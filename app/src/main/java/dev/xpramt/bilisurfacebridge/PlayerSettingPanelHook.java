@@ -16,9 +16,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Adds a "Bili Extended" row to Bilibili's in-player settings panel (the right-hand panel of the
@@ -57,7 +54,7 @@ final class PlayerSettingPanelHook {
 
     static String install(ClassLoader classLoader) {
         try {
-            Class<?> widgetClass = XposedHelpers.findClassIfExists(WIDGET_CLASS, classLoader);
+            Class<?> widgetClass = Xp.findClassIfExists(WIDGET_CLASS, classLoader);
             if (widgetClass == null) {
                 return "in-player settings panel not found";
             }
@@ -79,16 +76,16 @@ final class PlayerSettingPanelHook {
             buildRow = build;
             positionType = build.getParameterTypes()[1];
             function0Class = classLoader.loadClass("kotlin.jvm.functions.Function0");
-            unit = XposedHelpers.getStaticObjectField(
+            unit = Xp.getStaticObjectField(
                     classLoader.loadClass("kotlin.Unit"), "INSTANCE");
-            XposedBridge.hookMethod(build, new RowBuilderHook());
+            Xp.hookMethod(build, new RowBuilderHook());
             for (Method method : widgetClass.getDeclaredMethods()) {
                 Class<?>[] parameters = method.getParameterTypes();
                 if (parameters.length == 1 && parameters[0] == Context.class
                         && View.class.isAssignableFrom(method.getReturnType())) {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             if (param.getResult() instanceof View) {
                                 content = new WeakReference<>((View) param.getResult());
                             }
@@ -108,6 +105,23 @@ final class PlayerSettingPanelHook {
 
     /** The newest render container service seen: the dialog entry has no widget to ask. */
     private static WeakReference<Object> renderService;
+
+    /** Hot reload: the activity and the render service seen last (Bilibili objects). */
+    static Object[] exportForHotReload() {
+        return new Object[]{topActivity == null ? null : topActivity.get(), renderService == null ? null : renderService.get()};
+    }
+
+    static void adoptAfterHotReload(Object exported) {
+        if (exported instanceof Object[]) {
+            Object[] state = (Object[]) exported;
+            if (state.length > 0 && state[0] instanceof Activity) {
+                noteActivity((Activity) state[0]);
+            }
+            if (state.length > 1 && state[1] != null) {
+                noteRenderService(state[1]);
+            }
+        }
+    }
 
     static void noteRenderService(Object service) {
         renderService = new WeakReference<>(service);
@@ -137,7 +151,7 @@ final class PlayerSettingPanelHook {
             try {
                 Object fragment = page == null ? null : page.get();
                 View list = fragment == null ? null
-                        : (View) XposedHelpers.callMethod(fragment, "getListView");
+                        : (View) Xp.callMethod(fragment, "getListView");
                 if (list == null || !list.isAttachedToWindow() || list.getWidth() <= 0) {
                     return null;
                 }
@@ -168,15 +182,15 @@ final class PlayerSettingPanelHook {
 
         static String install(ClassLoader loader) {
             try {
-                Class<?> fragment = XposedHelpers.findClassIfExists(
+                Class<?> fragment = Xp.findClassIfExists(
                         "androidx.preference.PreferenceFragmentCompat", loader);
                 if (fragment == null) {
                     return "settings page entry: PreferenceFragmentCompat not found";
                 }
-                int hooked = XposedBridge.hookAllMethods(fragment, "setPreferenceScreen",
-                        new XC_MethodHook() {
+                int hooked = Xp.hookAllMethods(fragment, "setPreferenceScreen",
+                        new Xp.Hook() {
                             @Override
-                            protected void afterHookedMethod(MethodHookParam param) {
+                            protected void after(Xp.Param param) {
                                 try {
                                     page = new WeakReference<>(param.thisObject);
                                     insert(param.args.length > 0 ? param.args[0] : null);
@@ -195,31 +209,31 @@ final class PlayerSettingPanelHook {
             if (screen == null) {
                 return;
             }
-            Object anchor = XposedHelpers.callMethod(screen, "findPreference", ANCHOR_KEY);
-            if (anchor == null || XposedHelpers.callMethod(screen, "findPreference", OUR_KEY) != null) {
+            Object anchor = Xp.callMethod(screen, "findPreference", ANCHOR_KEY);
+            if (anchor == null || Xp.callMethod(screen, "findPreference", OUR_KEY) != null) {
                 return;
             }
-            Object group = XposedHelpers.callMethod(anchor, "getParent");
+            Object group = Xp.callMethod(anchor, "getParent");
             if (group == null) {
                 return;
             }
-            Context context = (Context) XposedHelpers.callMethod(anchor, "getContext");
-            int anchorOrder = (Integer) XposedHelpers.callMethod(anchor, "getOrder");
+            Context context = (Context) Xp.callMethod(anchor, "getContext");
+            int anchorOrder = (Integer) Xp.callMethod(anchor, "getOrder");
             Object ours;
             try {
-                ours = XposedHelpers.newInstance(anchor.getClass(), context);
+                ours = Xp.newInstance(anchor.getClass(), context);
             } catch (Throwable throwable) {
-                ours = XposedHelpers.newInstance(XposedHelpers.findClass(
+                ours = Xp.newInstance(Xp.findClass(
                         "androidx.preference.Preference", anchor.getClass().getClassLoader()),
                         context);
             }
-            XposedHelpers.callMethod(ours, "setKey", OUR_KEY);
-            XposedHelpers.callMethod(ours, "setTitle", (CharSequence) ROW_TITLE);
-            XposedHelpers.callMethod(ours, "setPersistent", false);
-            XposedHelpers.callMethod(ours, "setLayoutResource",
-                    XposedHelpers.callMethod(anchor, "getLayoutResource"));
-            XposedHelpers.callMethod(ours, "setWidgetLayoutResource",
-                    XposedHelpers.callMethod(anchor, "getWidgetLayoutResource"));
+            Xp.callMethod(ours, "setKey", OUR_KEY);
+            Xp.callMethod(ours, "setTitle", (CharSequence) ROW_TITLE);
+            Xp.callMethod(ours, "setPersistent", false);
+            Xp.callMethod(ours, "setLayoutResource",
+                    Xp.callMethod(anchor, "getLayoutResource"));
+            Xp.callMethod(ours, "setWidgetLayoutResource",
+                    Xp.callMethod(anchor, "getWidgetLayoutResource"));
             // The listener interface's name is obfuscated: take its type from the setter.
             Method setter = null;
             for (Method method : ours.getClass().getMethods()) {
@@ -248,16 +262,16 @@ final class PlayerSettingPanelHook {
                         }
                     }));
             // Make room: everything after the anchor moves one place down, then ours goes in.
-            int count = (Integer) XposedHelpers.callMethod(group, "getPreferenceCount");
+            int count = (Integer) Xp.callMethod(group, "getPreferenceCount");
             for (int index = 0; index < count; index++) {
-                Object sibling = XposedHelpers.callMethod(group, "getPreference", index);
-                int order = (Integer) XposedHelpers.callMethod(sibling, "getOrder");
+                Object sibling = Xp.callMethod(group, "getPreference", index);
+                int order = (Integer) Xp.callMethod(sibling, "getOrder");
                 if (order > anchorOrder) {
-                    XposedHelpers.callMethod(sibling, "setOrder", order + 1);
+                    Xp.callMethod(sibling, "setOrder", order + 1);
                 }
             }
-            XposedHelpers.callMethod(ours, "setOrder", anchorOrder + 1);
-            Object added = XposedHelpers.callMethod(group, "addPreference", ours);
+            Xp.callMethod(ours, "setOrder", anchorOrder + 1);
+            Object added = Xp.callMethod(group, "addPreference", ours);
             android.util.Log.i(TAG, "settings page entry added=" + added + " order="
                     + (anchorOrder + 1) + " class=" + ours.getClass().getName());
         }
@@ -265,7 +279,7 @@ final class PlayerSettingPanelHook {
         private static void openFromSettingsPage(Object listener, Object preference) {
             try {
                 Context context = preference == null ? null
-                        : (Context) XposedHelpers.callMethod(preference, "getContext");
+                        : (Context) Xp.callMethod(preference, "getContext");
                 while (context instanceof ContextWrapper && !(context instanceof Activity)) {
                     context = ((ContextWrapper) context).getBaseContext();
                 }
@@ -305,20 +319,20 @@ final class PlayerSettingPanelHook {
 
         static String install(ClassLoader loader) {
             try {
-                final Class<?> adapter = XposedHelpers.findClassIfExists(ADAPTER, loader);
+                final Class<?> adapter = Xp.findClassIfExists(ADAPTER, loader);
                 if (adapter == null) {
                     return "settings dialog entry: adapter not found";
                 }
-                XposedBridge.hookAllMethods(android.app.Dialog.class, "show", new XC_MethodHook() {
+                Xp.hookAllMethods(android.app.Dialog.class, "show", new Xp.Hook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    protected void after(Xp.Param param) {
                         lastDialog = new WeakReference<>((android.app.Dialog) param.thisObject);
                     }
                 });
-                int hooked = XposedBridge.hookAllMethods(adapter, "updateData",
-                        new XC_MethodHook() {
+                int hooked = Xp.hookAllMethods(adapter, "updateData",
+                        new Xp.Hook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+                            protected void before(Xp.Param param) {
                                 try {
                                     insert(param);
                                 } catch (Throwable throwable) {
@@ -362,7 +376,7 @@ final class PlayerSettingPanelHook {
             return "";
         }
 
-        private static void insert(XC_MethodHook.MethodHookParam param) throws Throwable {
+        private static void insert(Xp.Param param) throws Throwable {
             if (param.args.length != 1 || !(param.args[0] instanceof List)) {
                 return;
             }
@@ -552,9 +566,9 @@ final class PlayerSettingPanelHook {
             for (Method method : service.getClass().getMethods()) {
                 if (method.getName().equals("setExactlyVideoLayerType")
                         && method.getParameterTypes().length == 1) {
-                    Object target = XposedHelpers.getStaticObjectField(
+                    Object target = Xp.getStaticObjectField(
                             method.getParameterTypes()[0], mode.bilibiliTypeField);
-                    Object current = XposedHelpers.callMethod(service, "getCurrentLayerType");
+                    Object current = Xp.callMethod(service, "getCurrentLayerType");
                     if (!target.equals(current)) {
                         method.invoke(service, target);
                     }
@@ -568,11 +582,11 @@ final class PlayerSettingPanelHook {
     }
 
     /** Puts our row in front of the first row of the feedback card. */
-    private static final class RowBuilderHook extends XC_MethodHook {
+    private static final class RowBuilderHook extends Xp.Hook {
         private static final String EXTRA_INSERT = "bsb_insert";
 
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
+        protected void before(Xp.Param param) {
             try {
                 int id = (Integer) param.args[0];
                 if (id != FEEDBACK_ROW && id != EDIT_PLAYER_ROW) {
@@ -593,22 +607,22 @@ final class PlayerSettingPanelHook {
         }
 
         @Override
-        protected void afterHookedMethod(MethodHookParam param) {
+        protected void after(Xp.Param param) {
             if (!Boolean.TRUE.equals(param.getObjectExtra(EXTRA_INSERT))) {
                 return;
             }
             try {
                 int id = (Integer) param.args[0];
                 // invokeOriginalMethod skips this hook, so the copy keeps the position we ask for.
-                List<?> template = (List<?>) XposedBridge.invokeOriginalMethod(
+                List<?> template = (List<?>) Xp.invokeOriginalMethod(
                         buildRow, param.thisObject, new Object[]{id, position("TOP")});
                 Object ourRow = template.get(0);
-                Object data = XposedHelpers.getObjectField(
-                        XposedHelpers.getObjectField(ourRow, "a"), "a");
+                Object data = Xp.getObjectField(
+                        Xp.getObjectField(ourRow, "a"), "a");
                 final Object widget = param.thisObject;
-                XposedHelpers.setObjectField(data, "a", ROW_TITLE);
-                XposedHelpers.setObjectField(data, "c", ROW_ICON);
-                XposedHelpers.setObjectField(data, "i", function0(() -> openPanel(widget)));
+                Xp.setObjectField(data, "a", ROW_TITLE);
+                Xp.setObjectField(data, "c", ROW_ICON);
+                Xp.setObjectField(data, "i", function0(() -> openPanel(widget)));
                 List<Object> merged = new ArrayList<>();
                 merged.add(ourRow);
                 merged.addAll((List<?>) param.getResult());
@@ -625,7 +639,7 @@ final class PlayerSettingPanelHook {
 
     private static void openPanel(final Object widget) {
         try {
-            Context context = (Context) XposedHelpers.callMethod(widget, "getMContext");
+            Context context = (Context) Xp.callMethod(widget, "getMContext");
             while (context instanceof ContextWrapper && !(context instanceof Activity)) {
                 context = ((ContextWrapper) context).getBaseContext();
             }
@@ -671,11 +685,11 @@ final class PlayerSettingPanelHook {
                     }
                     field.setAccessible(true);
                     Object service = field.get(widget);
-                    Object target = XposedHelpers.getStaticObjectField(
+                    Object target = Xp.getStaticObjectField(
                             method.getParameterTypes()[0], mode.bilibiliTypeField);
-                    Object current = XposedHelpers.callMethod(service, "getCurrentLayerType");
+                    Object current = Xp.callMethod(service, "getCurrentLayerType");
                     if (!target.equals(current)) {
-                        XposedHelpers.callMethod(service, "setExactlyVideoLayerType", target);
+                        Xp.callMethod(service, "setExactlyVideoLayerType", target);
                     }
                     return;
                 }
@@ -725,7 +739,7 @@ final class PlayerSettingPanelHook {
                 return;
             }
         }
-        XposedBridge.log(TAG + ": in-player settings panel " + key + " failed: "
+        Xp.log(TAG + ": in-player settings panel " + key + " failed: "
                 + throwable.getClass().getSimpleName() + " " + throwable.getMessage());
     }
 }

@@ -156,6 +156,7 @@ final class InPlayerSettingsPanel {
         scroll.post(() -> scroll.scrollTo(0, 0));
 
         smoothness(card(content, "流暢度"));
+        speed(card(content, "倍速"));
         overlay(card(content, "資訊浮層"));
         audio(card(content, "音訊"));
         behaviour(card(content, "頁面行為"));
@@ -167,9 +168,7 @@ final class InPlayerSettingsPanel {
         switchRow(card, "Media3 Vsync", "讓影片幀對齊螢幕刷新；切換後約 1～2 秒生效。",
                 ModulePreferences.loadMedia3FrameSyncForHook(),
                 ModulePreferences.KEY_MEDIA3_FRAME_SYNC, null);
-        switchRow(card, "高通解碼器輸出 fence", "降低解碼延遲；下一支影片生效。",
-                ModulePreferences.loadQtiOutputFenceForHook(),
-                ModulePreferences.KEY_QTI_OUTPUT_FENCE, null);
+        scheduleSliders(card);
         switchRow(card, "HDR 影片自動用 Surface", "播 HDR 影片時改用直連 Surface，才會觸發系統 HDR；其他影片維持你選的渲染器。",
                 ModulePreferences.loadHdrAutoSurfaceForHook(),
                 ModulePreferences.KEY_HDR_AUTO_SURFACE,
@@ -180,6 +179,35 @@ final class InPlayerSettingsPanel {
                     ModulePreferences.KEY_NATIVE_RESOLUTION_OUTPUT,
                     enabled -> NativeResolutionOutput.refreshAll());
         }
+    }
+
+
+    /** Live Media3 schedule knobs: ready window, late-drop threshold (the handoff gate is always on; a too-early frame is re-checked at the exact moment it becomes ready; no interval to set). */
+    private void scheduleSliders(LinearLayout card) {
+        sliderRow(card, "距離預定上屏的門檻", "ms",
+                ModulePreferences.MIN_MEDIA3_READY_WINDOW_MS,
+                ModulePreferences.MAX_MEDIA3_READY_WINDOW_MS,
+                ModulePreferences.loadMedia3ReadyWindowMsForHook(),
+                liveSchedule(ModulePreferences.KEY_MEDIA3_READY_WINDOW_MS,
+                        NativeRefreshCap::setMedia3ReadyWindowMs),
+                save(ModulePreferences.KEY_MEDIA3_READY_WINDOW_MS),
+                "距離預定上屏還超過這個時間就不交，等下次再問。");
+        sliderRow(card, "比聲音晚到多少毫秒允許丟幀", "ms",
+                ModulePreferences.MIN_MEDIA3_LATE_DROP_MS,
+                ModulePreferences.MAX_MEDIA3_LATE_DROP_MS,
+                ModulePreferences.loadMedia3LateDropMsForHook(),
+                liveSchedule(ModulePreferences.KEY_MEDIA3_LATE_DROP_MS,
+                        NativeRefreshCap::setMedia3LateDropMs),
+                save(ModulePreferences.KEY_MEDIA3_LATE_DROP_MS),
+                "比聲音晚超過這個時間才允許丟掉這張，讓畫面追上聲音。");
+    }
+
+    /** Applies while dragging: host override + native atomic, no disk write yet. */
+    private IntAction liveSchedule(final String key, final IntAction nativeApply) {
+        return value -> {
+            ModulePreferences.set(key, value);
+            nativeApply.run(value);
+        };
     }
 
     private void overlay(LinearLayout card) {
@@ -207,6 +235,19 @@ final class InPlayerSettingsPanel {
                 ModulePreferences.KEY_REPLACE_STORY_VIDEO, null);
     }
 
+    private void speed(LinearLayout card) {
+        switchRow(card, "高倍速（最高 10x）",
+                "解除播放核心的倍速上限（原本 60 fps 以上最高 2x、其餘 3x），並在倍速選單最前面加入 10x～2.5x；約 1 秒後生效，倍速選單下次打開時更新。高幀率或 4K 的高倍速可能解碼不及。",
+                ModulePreferences.loadHighSpeedForHook(),
+                ModulePreferences.KEY_HIGH_SPEED, null);
+        float longPress = ModulePreferences.loadLongPressSpeedOverrideForHook();
+        sliderRow(card, "長按加速倍率", "x", Math.round(SpeedSettings.MIN_RATE * 2), Math.round(SpeedSettings.MAX_RATE * 2),
+                Math.round((Float.isNaN(longPress) ? SpeedSettings.DEFAULT_LONG_PRESS_RATE : longPress) * 2), 2,
+                value -> { },
+                value -> ModulePreferences.set(ModulePreferences.KEY_LONG_PRESS_SPEED, value / 2.0f),
+                "沒調過時沿用 Bilibili 的 3x；調整後下次長按生效。超過 3x 需開「高倍速」。");
+    }
+
     // ---- rows ---------------------------------------------------------------------------
 
     private interface OnChanged {
@@ -225,7 +266,7 @@ final class InPlayerSettingsPanel {
         row.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton button, boolean isChecked) {
-                HostSettings.set(key, isChecked);
+                ModulePreferences.set(key, isChecked);
                 if (after != null) {
                     try {
                         after.run(isChecked);
@@ -255,7 +296,7 @@ final class InPlayerSettingsPanel {
             chip.setGravity(Gravity.CENTER);
             chip.setPadding(dp(4), 0, dp(4), 0);
             chip.setOnClickListener(v -> {
-                HostSettings.set(ModulePreferences.KEY_VIDEO_DETAIL_RENDERER_MODE, mode.name());
+                ModulePreferences.set(ModulePreferences.KEY_VIDEO_DETAIL_RENDERER_MODE, mode.name());
                 paintChips(chips, modes, mode);
                 try {
                     actions.applyRenderer(mode);
@@ -319,19 +360,26 @@ final class InPlayerSettingsPanel {
     /** Applies while dragging, without a write per step. */
     private IntAction live(final String key) {
         return value -> {
-            ModulePreferences.setHostOverride(key, value);
+            ModulePreferences.set(key, value);
             PlaybackDebugOverlay.refreshAll();
         };
     }
 
-    /** Written to the module app when the finger lifts or a step button is pressed. */
+    /** Stored when the finger lifts or a step button is pressed. */
     private IntAction save(final String key) {
-        return value -> HostSettings.write(key, value);
+        return value -> ModulePreferences.set(key, value);
     }
 
     /** A slider with a label, small − and + for single steps, and an optional note. */
     private void sliderRow(LinearLayout card, final String name, final String unit, final int min,
                            final int max, int initial, final IntAction live, final IntAction save,
+                           String note) {
+        sliderRow(card, name, unit, min, max, initial, 1, live, save, note);
+    }
+
+    /** divisor 2: the slider counts half units (the label shows progress / 2). */
+    private void sliderRow(LinearLayout card, final String name, final String unit, final int min,
+                           final int max, int initial, final int divisor, final IntAction live, final IntAction save,
                            String note) {
         startRow(card);
         final TextView label = text("", 17, PRIMARY);
@@ -341,11 +389,11 @@ final class InPlayerSettingsPanel {
         slider.setPadding(dp(6), dp(8), dp(6), dp(8));
         final int start = Math.max(min, Math.min(max, initial));
         slider.setProgress(start - min);
-        label.setText(valueText(name, start, unit));
+        label.setText(valueText(name, start, divisor, unit));
         slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                label.setText(valueText(name, progress + min, unit));
+                label.setText(valueText(name, progress + min, divisor, unit));
                 live.run(progress + min);
             }
 
@@ -379,8 +427,9 @@ final class InPlayerSettingsPanel {
         }
     }
 
-    private static String valueText(String name, int value, String unit) {
-        return name + "　" + value + " " + unit;
+    private static String valueText(String name, int value, int divisor, String unit) {
+        return name + "　" + (divisor == 1 ? String.valueOf(value)
+                : String.format(java.util.Locale.ROOT, "%.1f", value / (double) divisor)) + " " + unit;
     }
 
     /** A small round button. */
@@ -478,6 +527,15 @@ final class InPlayerSettingsPanel {
                 android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback);
     }
 
+    /** Hot reload, old generation (main thread). */
+    static void closeForHotReload() {
+        InPlayerSettingsPanel panel = current;
+        View root = currentRoot;
+        if (panel != null && root != null) {
+            panel.close(root);
+        }
+    }
+
     private void close(View root) {
         if (backCallback != null && Build.VERSION.SDK_INT >= 33) {
             activity.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
@@ -497,7 +555,7 @@ final class InPlayerSettingsPanel {
     }
 
     private static void logFailure(String what, Throwable throwable) {
-        de.robv.android.xposed.XposedBridge.log("BiliExtended: in-player settings " + what
+        Xp.log("BiliExtended: in-player settings " + what
                 + " failed: " + throwable.getClass().getSimpleName() + " "
                 + throwable.getMessage());
     }

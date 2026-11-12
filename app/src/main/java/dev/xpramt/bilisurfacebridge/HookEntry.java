@@ -27,11 +27,9 @@ import java.util.WeakHashMap;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Proxy;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
+
 
 /**
  * Selects the requested Bilibili renderer only for a normal video-detail player. This avoids
@@ -39,7 +37,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * live-room Activity, without changing the live renderer. The module logs renderer and display
  * facts without reading media URLs, account data, cookies, or playback authorization data.
  */
-public final class HookEntry implements IXposedHookLoadPackage {
+public final class HookEntry extends XposedModule {
     private static final String TAG = "BiliExtended";
     private static final String TARGET_PACKAGE = "tv.danmaku.bili";
     private static final String IJK_SERVICE_PROCESS = "tv.danmaku.bili:ijkservice";
@@ -88,61 +86,219 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final String IJK_VIDEO_DISPLAY_CALLBACK =
             "tv.danmaku.ijk.media.player.IjkMediaPlayer$OnVideoDisplayCallback";
 
+    /** The process this module instance runs in (one instance per process). */
+    private String processName;
+
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
-        if (!TARGET_PACKAGE.equals(loadPackageParam.packageName)) {
+    public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
+        Xp.init(this);
+        processName = param.getProcessName();
+    }
+
+    /** Bilibili's class loader and data folder the hooks were installed with: what a hot-reloaded generation needs to install them again. */
+    private ClassLoader installedLoader;
+    private String installedDataDir;
+
+    /**
+     * Hot reload (autoHotReload=true): a new module version installed while Bilibili runs takes over without restarting it.
+     *
+     * <p>Old generation, here.  After an update the new generation loads its OWN copy of the native library from the new APK (measured 2026-11-11:
+     * both copies mapped, separate globals), so this copy first gives every IJK GOT slot it replaced back and stops its threads (nativeRetire);
+     * then every module loop stops (Generation), the overlays and the panel leave the screen, and what the next generation needs is handed over:
+     * the decoders that are playing with Bilibili's listeners, the playback rate, the overlay text, the activities.  Declined (the old code keeps
+     * running until Bilibili restarts) when the native side cannot hand back (legacy inline probes).
+     */
+    @Override
+    public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        if (installedLoader == null) {
+            return false;   // nothing installed in this process
+        }
+        long t0 = System.nanoTime();
+        String nativeResult = NativeRefreshCap.retireIfLoaded();
+        if (nativeResult.startsWith("refused")) {
+            log("hot reload declined in " + processName + ": " + nativeResult);
+            return false;
+        }
+        final java.util.HashMap<String, Object> handover = new java.util.HashMap<String, Object>();
+        handover.put("loader", installedLoader);
+        handover.put("hookedMethods", Xp.hookedMethods());
+        handover.put("dataDir", installedDataDir);
+        Generation.retire();
+        Generation.runQuietly(() -> Media3FrameSynchronizer.exportForHotReload(handover));
+        Generation.runQuietly(BiliSettings::flushNow);
+        Generation.runQuietly(RateStateFile::shutdownForHotReload);
+        Generation.runQuietly(PerfSampleOffload::shutdownForHotReload);
+        if (TARGET_PACKAGE.equals(processName)) {
+            handover.put("containers", exportContainers());
+            handover.put("compositorSurface", ExternalRenderImmediate.exportForHotReload());
+            handover.put("nativeResolution", NativeResolutionOutput.exportForHotReload());
+            handover.put("streamLabels", Generation.exportLabels(PlaybackStreamOverlay.class));
+            Generation.onMainThread(() -> {
+                handover.put("debugOverlay", PlaybackDebugOverlay.retireForHotReload());
+                handover.put("streamOverlay", PlaybackStreamOverlay.retireForHotReload());
+                handover.put("textureViews", TextureViewVsyncInvalidator.exportForHotReload());
+                handover.put("vsyncRelay", Boolean.valueOf(AppVsyncRelay.isRunning()));
+                handover.put("panelEntry", PlayerSettingPanelHook.exportForHotReload());
+                InPlayerSettingsPanel.closeForHotReload();
+            }, 1500L);
+        }
+        param.setSavedInstanceState(handover);
+        Object codecs = handover.get("m3.codecs");
+        log("hot reloading: handed over process=" + processName + " pid=" + android.os.Process.myPid() + " native=" + nativeResult
+                + " codecs=" + (codecs instanceof java.util.List ? ((java.util.List<?>) codecs).size() : 0) + " rate=" + handover.get("m3.rate")
+                + " took=" + (System.nanoTime() - t0) / 1_000_000L + "ms");
+        return true;
+    }
+
+    /** New generation: install every hook again and take over what the old one handed over (see onHotReloading). */
+    @Override
+    public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
+        long t0 = System.nanoTime();
+        int oldHooks = param.getOldHookHandles() == null ? -1 : param.getOldHookHandles().size();
+        super.onHotReloaded(param);   // removes the old generation's hooks
+        Xp.init(this);
+        processName = param.getProcessName();
+        Object saved = param.getSavedInstanceState();
+        if (!(saved instanceof java.util.Map)) {
+            log("hot reloaded in " + processName + " without a hand-over: hooks are installed at the next Bilibili start");
             return;
         }
+        final java.util.Map<?, ?> handover = (java.util.Map<?, ?>) saved;
+        installedLoader = (ClassLoader) handover.get("loader");
+        installedDataDir = (String) handover.get("dataDir");
+        BiliSettings.init(installedDataDir);
+        install(processName, installedLoader);
+        String adopted = "";
+        if (IJK_SERVICE_PROCESS.equals(processName)) {
+            applyExperiments(null);   // the service already started: its native hooks would otherwise wait for the next one
+            adopted = Media3FrameSynchronizer.adoptAfterHotReload(handover);
+        }
+        if (TARGET_PACKAGE.equals(processName)) {
+            final int containers = rediscoverContainers(handover.get("containers"), installedLoader);
+            adopted = "containers=" + containers + " compositor=" + ExternalRenderImmediate.adoptAfterHotReload(handover.get("compositorSurface")) + " ";
+            Generation.importLabels(PlaybackStreamOverlay.class, handover.get("streamLabels"));
+            Generation.onMainThread(() -> {
+                PlayerSettingPanelHook.adoptAfterHotReload(handover.get("panelEntry"));
+                NativeResolutionOutput.adoptAfterHotReload(handover.get("nativeResolution"));
+                if (Boolean.TRUE.equals(handover.get("vsyncRelay"))) {
+                    AppVsyncRelay.start();
+                }
+                TextureViewVsyncInvalidator.adoptAfterHotReload(handover.get("textureViews"));
+                for (Activity activity : activities(handover.get("streamOverlay"))) {
+                    attachStreamOverlayToActivity(activity);
+                }
+                if (ModulePreferences.loadPlaybackDebugOverlayForHook()) {
+                    for (Activity activity : activities(handover.get("debugOverlay"))) {
+                        PlaybackDebugOverlay.show(activity, "");
+                    }
+                }
+            }, 1500L);
+            adopted += "overlays=" + activities(handover.get("streamOverlay")).size() + "/" + activities(handover.get("debugOverlay")).size();
+        }
+        log("hot reloaded in process=" + processName + " pid=" + android.os.Process.myPid() + " oldHooks=" + oldHooks + " " + adopted
+                + " took=" + (System.nanoTime() - t0) / 1_000_000L + "ms");
+        // What the old generation had hooked that this one has not (yet): hooks installed on events that happened before the reload.
+        java.util.List<String> missing = new java.util.ArrayList<String>();
+        if (handover.get("hookedMethods") instanceof java.util.List) {
+            java.util.List<String> now = Xp.hookedMethods();
+            for (Object method : (java.util.List<?>) handover.get("hookedMethods")) {
+                if (!now.contains(String.valueOf(method))) {
+                    missing.add(String.valueOf(method));
+                }
+            }
+        }
+        log("hot reload: hooks of the old generation not installed again=" + missing.size() + (missing.isEmpty() ? "" : " " + missing));
+    }
+
+    private static java.util.List<Activity> activities(Object handedOver) {
+        java.util.List<Activity> result = new java.util.ArrayList<Activity>();
+        if (handedOver instanceof java.util.List) {
+            for (Object item : (java.util.List<?>) handedOver) {
+                if (item instanceof Activity && !((Activity) item).isFinishing() && !((Activity) item).isDestroyed()) {
+                    result.add((Activity) item);
+                }
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
+        if (!TARGET_PACKAGE.equals(param.getPackageName()) || !param.isFirstPackage()) {
+            return;
+        }
+        installedDataDir = param.getApplicationInfo() == null ? null : param.getApplicationInfo().dataDir;
+        BiliSettings.init(installedDataDir);
+        installedLoader = param.getClassLoader();
+        install(processName, installedLoader);
+    }
+
+    private void install(String processName, ClassLoader classLoader) {
         log("loaded for Bilibili; no media or account data is collected");
         boolean minimalMedia3Enabled = ModulePreferences.loadMinimalMedia3PlayerForHook();
         log("minimal Media3 preference=" + minimalMedia3Enabled
-                + " process=" + loadPackageParam.processName);
+                + " process=" + processName);
         if (minimalMedia3Enabled) {
-            logOnce("minimal-media3-player:" + loadPackageParam.processName,
-                    Media3MinimalPlayerBridge.install(loadPackageParam.classLoader));
+            logOnce("minimal-media3-player:" + processName,
+                    Media3MinimalPlayerBridge.install(classLoader));
         } else {
-            logOnce("stream-selection-probe:" + loadPackageParam.processName,
+            logOnce("stream-selection-probe:" + processName,
                     Media3MinimalPlayerBridge.installStreamSelectionProbe(
-                            loadPackageParam.classLoader));
+                            classLoader));
         }
-        if (IJK_SERVICE_PROCESS.equals(loadPackageParam.processName)) {
-            hookIjkService(loadPackageParam.classLoader);
+        // Bisect switch (2026-11-09): `debug.biliextended.off` is a bit mask read once per process start; 1 = no ijkservice hooks, 2 = no external-render hooks (main),
+        // 4 = no picture-queue / decoder-format relay hooks (main), 8 = no UI hooks (main), 16 = no display-counter / factory / container / lifecycle hooks.  Used to find
+        // which part of the module causes the ~500 ms codec stalls; 0 / unset = everything installed (normal).
+        final int off = DebugLog.readInt("debug.biliextended.off", 0);
+        if (IJK_SERVICE_PROCESS.equals(processName)) {
+            if ((off & 1) == 0) {
+                hookIjkService(classLoader);
+            }
             return;
         }
-        if (TARGET_PACKAGE.equals(loadPackageParam.processName)) {
+        if (TARGET_PACKAGE.equals(processName)) {
             // The IjkMediaPlayer Java API is driven from the main process (it forwards to the
             // service over AIDL), so player option hooks belong here, not in the service.
-            installPictureQueueSizeHook(loadPackageParam.classLoader);
+            if ((off & 4) == 0) {
+            installPictureQueueSizeHook(classLoader);
             // Installed whatever the setting says; each hook checks Media3 Vsync when it runs, so
             // the in-player menu can switch it on without restarting Bilibili.
             logOnce("main-process-decoder-format",
                     Media3FrameSynchronizer.installMainProcessDecoderFormatRelay());
+            }
+            if ((off & 2) == 0) {
             logOnce("external-render-immediate", ExternalRenderImmediate.install());
             logOnce("textureview-vsync-invalidator", TextureViewVsyncInvalidator.install());
             logOnce("external-render-timestamps", ExternalRenderTimestamps.install());
+            }
+            logOnce("java-player-stall-probe", JavaPlayerStallProbe.install());
+            logOnce("perf-sample-offload", PerfSampleOffload.install(classLoader));
         }
         // Installed regardless of the setting, which the hooks read when they fire: under NPatch
         // manager mode the module preferences are unreadable until Bilibili's Application
         // exists, so a load-time check would always see the default.
-        if (TARGET_PACKAGE.equals(loadPackageParam.processName)) {
-            logOnce("replace-story-video", StoryRouteHook.install(loadPackageParam.classLoader));
+        if (TARGET_PACKAGE.equals(processName) && (off & 8) == 0) {
+            logOnce("replace-story-video", StoryRouteHook.install(classLoader));
+            logOnce("speed-menu", SpeedMenuHook.install(classLoader));
             logOnce("player-settings-panel",
-                    PlayerSettingPanelHook.install(loadPackageParam.classLoader));
+                    PlayerSettingPanelHook.install(classLoader));
         }
-        hookIjkDisplayFrameCounter(loadPackageParam.classLoader);
-        hookFactory(loadPackageParam.classLoader);
-        hookRenderContainer(loadPackageParam.classLoader);
-        hookPlaybackActivityLifecycle(loadPackageParam.classLoader);
+        if ((off & 16) == 0) {
+            hookIjkDisplayFrameCounter(classLoader);
+            hookFactory(classLoader);
+            hookRenderContainer(classLoader);
+            hookPlaybackActivityLifecycle(classLoader);
+        }
     }
 
     private void hookIjkDisplayFrameCounter(ClassLoader classLoader) {
         try {
-            Class<?> ijkPlayerClass = XposedHelpers.findClass(IJK_PLAYER, classLoader);
-            Class<?> callbackClass = XposedHelpers.findClass(IJK_VIDEO_DISPLAY_CALLBACK, classLoader);
-            XposedHelpers.findAndHookMethod(ijkPlayerClass, "setOnVideoDisplayCallback", callbackClass,
-                    new XC_MethodHook() {
+            Class<?> ijkPlayerClass = Xp.findClass(IJK_PLAYER, classLoader);
+            Class<?> callbackClass = Xp.findClass(IJK_VIDEO_DISPLAY_CALLBACK, classLoader);
+            Xp.findAndHookMethod(ijkPlayerClass, "setOnVideoDisplayCallback", callbackClass,
+                    new Xp.Hook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void before(Xp.Param param) {
                             // Always counting, so the overlay can be switched on mid-playback.
                             Object delegate = param.args[0];
                             if (delegate != null && Proxy.isProxyClass(delegate.getClass())
@@ -154,19 +310,19 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                     callbackClass, delegate);
                         }
                     });
-            XposedHelpers.findAndHookMethod(ijkPlayerClass, "start", new XC_MethodHook() {
+            Xp.findAndHookMethod(ijkPlayerClass, "start", new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     try {
                         PlaybackDebugOverlay.resetFrameTiming();
-                        Object existingCallback = XposedHelpers.getObjectField(
+                        Object existingCallback = Xp.getObjectField(
                                 param.thisObject, "mOnVideoDisplayCallback");
                         if (existingCallback != null && Proxy.isProxyClass(existingCallback.getClass())
                                 && Proxy.getInvocationHandler(existingCallback)
                                 instanceof PlaybackDebugOverlay.FrameCallbackProxy) {
                             return;
                         }
-                        XposedHelpers.callMethod(param.thisObject, "setOnVideoDisplayCallback",
+                        Xp.callMethod(param.thisObject, "setOnVideoDisplayCallback",
                                 PlaybackDebugOverlay.frameCallback(callbackClass, existingCallback));
                     } catch (Throwable throwable) {
                         logOnce("ijk-debug-start", "IJK debug callback unavailable: "
@@ -195,25 +351,36 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 logOnce("p2-render-cadence-probe-service",
                         RenderCadenceProbe.install());
             }
-            Class<?> serviceClass = XposedHelpers.findClass(IJK_SERVICE, classLoader);
-            XposedHelpers.findAndHookMethod(serviceClass, "loadLibrariesOnce", Bundle.class,
-                    new XC_MethodHook() {
+            // bisect bits for the ijkservice (2026-11-09, `debug.biliextended.off`): 32 = no native hooks / pictq patch / thread boost, 64 = no MediaCodec hooks,
+            // 128 = no playback-clock hooks, 256 = no sync watcher
+            final int off = DebugLog.readInt("debug.biliextended.off", 0);
+            Class<?> serviceClass = Xp.findClass(IJK_SERVICE, classLoader);
+            if ((off & 32) == 0) {
+            Xp.findAndHookMethod(serviceClass, "loadLibrariesOnce", Bundle.class,
+                    new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             applyExperiments(param.thisObject);
                         }
                     });
-            XposedHelpers.findAndHookMethod(serviceClass, "onBind", Intent.class,
-                    new XC_MethodHook() {
+            Xp.findAndHookMethod(serviceClass, "onBind", Intent.class,
+                    new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             applyExperiments(param.thisObject);
                         }
             });
-            logOnce("mediacodec-frame-sync-hooks", Media3FrameSynchronizer.install());
-            logOnce("media3-playback-clock-hooks",
-                    Media3FrameSynchronizer.installPlaybackClockHooks(classLoader));
-            Media3SyncWatcher.start();
+            }
+            if ((off & 64) == 0) {
+                logOnce("mediacodec-frame-sync-hooks", Media3FrameSynchronizer.install());
+            }
+            if ((off & 128) == 0) {
+                logOnce("media3-playback-clock-hooks",
+                        Media3FrameSynchronizer.installPlaybackClockHooks(classLoader));
+            }
+            if ((off & 256) == 0) {
+                Media3SyncWatcher.start();
+            }
             log("hooked IjkMediaPlayerService device=" + Build.MODEL);
         } catch (Throwable throwable) {
             log("IJK refresh-cap hook unavailable: " + throwable.getClass().getSimpleName());
@@ -227,6 +394,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
      * hardware decoder and give the pool one buffer back.  Option category 4 = player.
      */
     private static final int PICTURE_QUEUE_SIZE = 12;
+    /**
+     * `debug.biliextended.pictq` (E4/P): unset or anything outside 12..16 keeps the shipped 12; 13..16 deepens the queue.  Read when the IJK player option is set (main process) and when the
+     * ijkservice applies its experiments, i.e. once per process start: changing it needs a new Bilibili process (force-stop), not just a new playback.
+     */
+    private static int pictureQueueSize() {
+        int value = DebugLog.readInt("debug.biliextended.pictq", PICTURE_QUEUE_SIZE);
+        return PictureQueuePolicy.resolve(value);
+    }
     private static final ThreadLocal<Boolean> INTERNAL_OPTION_CALL = new ThreadLocal<Boolean>();
 
     // Disabled: Bilibili 9.13.0's IJK rejects the option ("Value 2 for parameter
@@ -240,12 +415,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return;
         }
         try {
-            final Class<?> playerClass = XposedHelpers.findClass(IJK_PLAYER, classLoader);
-            XC_MethodHook optionHook = new XC_MethodHook() {
+            final Class<?> playerClass = Xp.findClass(IJK_PLAYER, classLoader);
+            Xp.Hook optionHook = new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     try {
-                        XposedHelpers.callMethod(param.thisObject, "_setOptionLong", 4,
+                        Xp.callMethod(param.thisObject, "_setOptionLong", 4,
                                 "video-pictq-size", 2L);
                         logOnce("ijk-pictq-size:" + param.method.getName(),
                                 "IJK video-pictq-size set to 2 before " + param.method.getName());
@@ -271,9 +446,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
             // the item path never fired on 9.13.0).
             final java.util.Set<Object> configured = java.util.Collections.newSetFromMap(
                     new java.util.WeakHashMap<Object, Boolean>());
-            XC_MethodHook firstOptionHook = new XC_MethodHook() {
+            Xp.Hook firstOptionHook = new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     if (Boolean.TRUE.equals(INTERNAL_OPTION_CALL.get())) {
                         return;
                     }
@@ -284,9 +459,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                         + param.args[2]);
                         if ("video-pictq-size".equals(optionName)
                                 && param.args[2] instanceof Long) {
-                            param.args[2] = (long) PICTURE_QUEUE_SIZE;
+                            param.args[2] = (long) pictureQueueSize();
                             logOnce("ijk-pictq-override", "IJK video-pictq-size overridden to "
-                                    + PICTURE_QUEUE_SIZE);
+                                    + pictureQueueSize());
                         }
                     }
                     synchronized (configured) {
@@ -296,10 +471,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     }
                     try {
                         INTERNAL_OPTION_CALL.set(Boolean.TRUE);
-                        XposedHelpers.callMethod(param.thisObject, "setOption", 4,
-                                "video-pictq-size", (long) PICTURE_QUEUE_SIZE);
+                        Xp.callMethod(param.thisObject, "setOption", 4,
+                                "video-pictq-size", (long) pictureQueueSize());
                         logOnce("ijk-pictq-size", "IJK video-pictq-size set to "
-                                + PICTURE_QUEUE_SIZE + " on first setOption");
+                                + pictureQueueSize() + " on first setOption");
                     } catch (Throwable throwable) {
                         logOnce("ijk-pictq-size-failed", "IJK video-pictq-size option failed="
                                 + throwable.getClass().getSimpleName() + " " + throwable.getMessage());
@@ -308,11 +483,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     }
                 }
             };
-            int hooked = XposedBridge.hookAllMethods(playerClass, "setOption", firstOptionHook).size();
+            int hooked = Xp.hookAllMethods(playerClass, "setOption", firstOptionHook).size();
             // Bilibili may configure through IjkMediaPlayerItem instead; list and hook its
             // option setters as well (the item forwards options to the native player).
             try {
-                Class<?> itemClass = XposedHelpers.findClass(
+                Class<?> itemClass = Xp.findClass(
                         "tv.danmaku.ijk.media.player.IjkMediaPlayerItem", classLoader);
                 StringBuilder itemNames = new StringBuilder();
                 for (java.lang.reflect.Method method : itemClass.getDeclaredMethods()) {
@@ -324,13 +499,13 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     }
                 }
                 logOnce("ijk-item-methods", "IjkMediaPlayerItem methods: " + itemNames);
-                hooked += XposedBridge.hookAllMethods(itemClass, "setOption", firstOptionHook).size();
+                hooked += Xp.hookAllMethods(itemClass, "setOption", firstOptionHook).size();
             } catch (Throwable throwable) {
                 logOnce("ijk-item-class", "IjkMediaPlayerItem unavailable="
                         + throwable.getClass().getSimpleName());
             }
             for (String name : new String[] {"prepareAsync", "_prepareAsync", "setIjkMediaPlayerItem"}) {
-                hooked += XposedBridge.hookAllMethods(playerClass, name, optionHook).size();
+                hooked += Xp.hookAllMethods(playerClass, name, optionHook).size();
             }
             log("hooked IjkMediaPlayer prepare paths for picture queue size=" + hooked);
         } catch (Throwable throwable) {
@@ -352,13 +527,18 @@ public final class HookEntry implements IXposedHookLoadPackage {
             // calls IjkMediaPlayer.setOption, so the main-process injection alone left the
             // queue at 3 there.  Log each distinct result so a "not loaded" first attempt
             // does not hide the later success.
-            String pictqPatch = NativeRefreshCap.patchPictureQueueRange(PICTURE_QUEUE_SIZE);
+            String pictqPatch = NativeRefreshCap.patchPictureQueueRange(pictureQueueSize());
             logOnce("ijk-pictq-range:" + pictqPatch, pictqPatch);
         }
+        // Independent of the telemetry hooks; installs once, later calls only refresh the limit.
+        // Failure (version mismatch, library not yet bound) leaves Bilibili's own cap in place.
+        String speedCap = NativeRefreshCap.installSpeedCapLift(
+                ModulePreferences.loadSpeedCapLimitForHook());
+        logOnce("ijk-speed-cap-lift:" + speedCap, speedCap);
         if (IjkExperimentActivation.shouldStartNativeHooks(debugOverlay, blockDrop,
                 blockComputeTargetDelay, frameQueueWaitRoundUp, media3FrameSync)) {
             logOnce("ijk-refresh-telemetry",
-                    NativeRefreshCap.startRefreshTelemetry(debugOverlay ? rawSamplePath() : ""));
+                    NativeRefreshCap.startRefreshTelemetry(rawSamplePath()));
             // Keep frame-drop blocking independent from Media3 timed release so the A/B test can
             // disable PTS/VSync release scheduling without restoring IJK's original drop path.
             logOnce("ijk-frame-drop-block:" + blockDrop,
@@ -377,16 +557,18 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory()) {
             return "";
         }
-        return new File(directory, "refresh_samples.csv").getAbsolutePath();
+        // The native sample CSV is removed together with the Java telemetry (user, 2026-11-08: 完全移除 CSV 相關程式).
+        // Returning "" tells the native side there is no file to write, so it stops sampling to disk.
+        return "";
     }
 
     private static Class<?> hintedClass(ClassLoader classLoader, String[] hints, String parent) {
-        Class<?> parentClass = XposedHelpers.findClassIfExists(parent, classLoader);
+        Class<?> parentClass = Xp.findClassIfExists(parent, classLoader);
         if (parentClass == null) {
             return null;
         }
         for (String hint : hints) {
-            Class<?> candidate = XposedHelpers.findClassIfExists(hint, classLoader);
+            Class<?> candidate = Xp.findClassIfExists(hint, classLoader);
             if (candidate != null && parentClass.isAssignableFrom(candidate)
                     && !candidate.isInterface()) {
                 return candidate;
@@ -397,7 +579,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private void hookFactory(ClassLoader classLoader) {
         try {
-            Class<?> legacy = XposedHelpers.findClassIfExists(FACTORY, classLoader);
+            Class<?> legacy = Xp.findClassIfExists(FACTORY, classLoader);
             if (legacy != null) {
                 hookFactoryClass(legacy, "b", classLoader);
                 return;
@@ -409,10 +591,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 log("video render factory name hint not found; waiting for runtime discovery");
             }
             // Any other concrete factory is hooked the first time one is constructed.
-            Class<?> base = XposedHelpers.findClass(VIDEO_RENDER_LAYER_FACTORY, classLoader);
-            XposedBridge.hookAllConstructors(base, new XC_MethodHook() {
+            Class<?> base = Xp.findClass(VIDEO_RENDER_LAYER_FACTORY, classLoader);
+            Xp.hookAllConstructors(base, new Xp.Hook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                protected void after(Xp.Param param) {
                     Class<?> concrete = param.thisObject.getClass();
                     if (concrete.getName().startsWith("com.bilibili.bililive.")) {
                         return;
@@ -430,11 +612,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return;
         }
         try {
-            final Class<?> typeClass = XposedHelpers.findClass(RENDER_TYPE, classLoader);
-            XposedHelpers.findAndHookMethod(factoryClass, methodName,
-                    typeClass, new XC_MethodHook() {
+            final Class<?> typeClass = Xp.findClass(RENDER_TYPE, classLoader);
+            Xp.findAndHookMethod(factoryClass, methodName,
+                    typeClass, new Xp.Hook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void before(Xp.Param param) {
                     Object requestedType = param.args[0];
                     Object configuredType = configuredRendererType(param.thisObject);
                     // The offline-cache player lives in UnitedPlaylistActivity and uses
@@ -447,7 +629,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         if (ModulePreferences.loadMinimalMedia3PlayerForHook()) {
                             mode = ModulePreferences.RendererMode.SURFACE;
                         }
-                        Object selectedRenderer = XposedHelpers.getStaticObjectField(
+                        Object selectedRenderer = Xp.getStaticObjectField(
                                 typeClass, mode.bilibiliTypeField);
                         param.args[0] = selectedRenderer;
                         logOnce("detail-renderer:" + mode.name(),
@@ -464,7 +646,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 }
 
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                protected void after(Xp.Param param) {
                     Object layer = param.getResult();
                     reportLayer("factory", layer);
                     attachDebugOverlayForPlayback(param.thisObject, layer);
@@ -487,7 +669,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private void hookRenderContainer(final ClassLoader classLoader) {
         try {
-            Class<?> legacy = XposedHelpers.findClassIfExists(RENDER_CONTAINER, classLoader);
+            Class<?> legacy = Xp.findClassIfExists(RENDER_CONTAINER, classLoader);
             if (legacy != null) {
                 hookRenderContainerClass(legacy, classLoader);
             } else {
@@ -512,45 +694,81 @@ public final class HookEntry implements IXposedHookLoadPackage {
      * the factory context is recorded directly, so a renamed obfuscated class still works.
      */
     private void hookPlayerContainerDiscovery(final ClassLoader classLoader) {
-        Class<?> base = XposedHelpers.findClassIfExists(ABSTRACT_PLAYER_CONTAINER, classLoader);
+        Class<?> base = Xp.findClassIfExists(ABSTRACT_PLAYER_CONTAINER, classLoader);
         if (base == null) {
             log("PlayerContainer discovery unavailable: class missing");
             return;
         }
-        XposedBridge.hookAllConstructors(base, new XC_MethodHook() {
+        Xp.hookAllConstructors(base, new Xp.Hook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                final Class<?> concrete = param.thisObject.getClass();
-                if (!HOOKED_CLASSES.add("player-container:" + concrete.getName())) {
-                    return;
-                }
-                try {
-                    int hooked = XposedBridge.hookAllMethods(concrete, "onCreate", new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam createParam) {
-                            discoverPlayerServices(createParam.thisObject, classLoader);
-                        }
-                    }).size();
-                    log("hooked player container discovery class=" + concrete.getName()
-                            + " onCreate=" + hooked);
-                } catch (Throwable throwable) {
-                    log("player container discovery hook failed: "
-                            + throwable.getClass().getSimpleName());
-                }
+            protected void after(Xp.Param param) {
+                hookPlayerContainerClass(param.thisObject.getClass(), classLoader);
             }
         });
+    }
+
+    /** The player containers whose services were discovered (Bilibili objects): a hot-reloaded generation discovers them again. */
+    private static final Map<Object, Boolean> DISCOVERED_CONTAINERS =
+            Collections.synchronizedMap(new WeakHashMap<Object, Boolean>());
+
+    private void hookPlayerContainerClass(final Class<?> concrete, final ClassLoader classLoader) {
+        if (!HOOKED_CLASSES.add("player-container:" + concrete.getName())) {
+            return;
+        }
+        try {
+            int hooked = Xp.hookAllMethods(concrete, "onCreate", new Xp.Hook() {
+                @Override
+                protected void after(Xp.Param createParam) {
+                    DISCOVERED_CONTAINERS.put(createParam.thisObject, Boolean.TRUE);
+                    discoverPlayerServices(createParam.thisObject, classLoader);
+                }
+            }).size();
+            log("hooked player container discovery class=" + concrete.getName()
+                    + " onCreate=" + hooked);
+        } catch (Throwable throwable) {
+            log("player container discovery hook failed: "
+                    + throwable.getClass().getSimpleName());
+        }
+    }
+
+    /** Hot reload, old generation: the containers discovered so far. */
+    private static java.util.List<Object> exportContainers() {
+        synchronized (DISCOVERED_CONTAINERS) {
+            return new java.util.ArrayList<Object>(DISCOVERED_CONTAINERS.keySet());
+        }
+    }
+
+    /** Hot reload, new generation: the hooks that are normally installed when a player is created, for the players that already exist. */
+    private int rediscoverContainers(Object handedOver, ClassLoader classLoader) {
+        int count = 0;
+        if (handedOver instanceof java.util.List) {
+            for (Object container : (java.util.List<?>) handedOver) {
+                if (container == null) {
+                    continue;
+                }
+                try {
+                    hookPlayerContainerClass(container.getClass(), classLoader);
+                    DISCOVERED_CONTAINERS.put(container, Boolean.TRUE);
+                    discoverPlayerServices(container, classLoader);
+                    count++;
+                } catch (Throwable throwable) {
+                    log("hot reload: player container not rediscovered: " + throwable.getClass().getSimpleName());
+                }
+            }
+        }
+        return count;
     }
 
     private void discoverPlayerServices(Object playerContainer, ClassLoader classLoader) {
         Object renderService = null;
         Object controlService = null;
         try {
-            renderService = XposedHelpers.callMethod(playerContainer, "getRenderContainerService");
+            renderService = Xp.callMethod(playerContainer, "getRenderContainerService");
         } catch (Throwable ignored) {
             // Reported below as missing.
         }
         try {
-            controlService = XposedHelpers.callMethod(playerContainer, "getControlContainerService");
+            controlService = Xp.callMethod(playerContainer, "getControlContainerService");
         } catch (Throwable ignored) {
             // Reported below as missing.
         }
@@ -616,7 +834,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return null;
         }
         try {
-            Object context = XposedHelpers.callMethod(playerContainer, "getContext");
+            Object context = Xp.callMethod(playerContainer, "getContext");
             if (context instanceof Context) {
                 return (Context) context;
             }
@@ -650,7 +868,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return;
         }
         try {
-            Class<?> layerClass = XposedHelpers.findClass(RENDER_LAYER, classLoader);
+            Class<?> layerClass = Xp.findClass(RENDER_LAYER, classLoader);
             int layerMethods = 0;
             int bindMethods = 0;
             for (java.lang.reflect.Method method : containerClass.getDeclaredMethods()) {
@@ -663,15 +881,15 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     // The attach method's name is obfuscated and shares this shape with the
                     // detach/replace methods; a layer counts as attached once its view has a
                     // parent after the call, and is reported once per layer instance.
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             Object layer = param.args[0];
                             if (layer == null || param.hasThrowable()) {
                                 return;
                             }
                             try {
-                                Object view = XposedHelpers.callMethod(layer, "getView");
+                                Object view = Xp.callMethod(layer, "getView");
                                 if (!(view instanceof View) || ((View) view).getParent() == null) {
                                     return;
                                 }
@@ -690,9 +908,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     });
                     layerMethods++;
                 } else if (method.getName().startsWith(BIND_PLAYER_CONTAINER_PREFIX)) {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    Xp.hookMethod(method, new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             try {
                                 recordFactoryContext(param.thisObject, param.args[0]);
                             } catch (Throwable throwable) {
@@ -717,14 +935,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
         try {
             Object playerParams = fieldOfType(factory, "tv.danmaku.biliplayerv2.PlayerParamsV2");
             if (playerParams == null) {
-                playerParams = XposedHelpers.getObjectField(factory, "a");
+                playerParams = Xp.getObjectField(factory, "a");
             }
             try {
-                Object config = XposedHelpers.callMethod(playerParams, "getConfig");
-                return XposedHelpers.callMethod(config, "getVideoRenderLayerType");
+                Object config = Xp.callMethod(playerParams, "getConfig");
+                return Xp.callMethod(config, "getVideoRenderLayerType");
             } catch (Throwable ignored) {
-                Object configuration = XposedHelpers.getObjectField(playerParams, "c");
-                return XposedHelpers.getObjectField(configuration, "l");
+                Object configuration = Xp.getObjectField(playerParams, "c");
+                return Xp.getObjectField(configuration, "l");
             }
         } catch (Throwable ignored) {
             return null;
@@ -869,10 +1087,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
         // Installed whatever the setting says now: embedded patching cannot read settings this
         // early, and PlaybackStreamOverlay.show() checks the setting each time it runs.
         try {
-            XposedHelpers.findAndHookMethod(Activity.class, "onPostResume",
-                    new XC_MethodHook() {
+            Xp.findAndHookMethod(Activity.class, "onPostResume",
+                    new Xp.Hook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void after(Xp.Param param) {
                             if (param.thisObject instanceof Activity) {
                                 attachStreamOverlayToActivity((Activity) param.thisObject);
                             }
@@ -891,7 +1109,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (!REPORTED.add("control-container-service-visibility-hook")) {
             return;
         }
-        Class<?> serviceClass = XposedHelpers.findClassIfExists(
+        Class<?> serviceClass = Xp.findClassIfExists(
                 CONTROL_CONTAINER_SERVICE, classLoader);
         if (serviceClass == null) {
             serviceClass = hintedClass(classLoader, CONTROL_CONTAINER_HINTS,
@@ -909,9 +1127,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return;
         }
         try {
-            XC_MethodHook visibilityHook = new XC_MethodHook() {
+            Xp.Hook visibilityHook = new Xp.Hook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                protected void after(Xp.Param param) {
                     if (param.hasThrowable()) {
                         return;
                     }
@@ -922,7 +1140,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     }
                     boolean visible;
                     try {
-                        Object isShowing = XposedHelpers.callMethod(
+                        Object isShowing = Xp.callMethod(
                                 param.thisObject, "isShowing");
                         visible = isShowing instanceof Boolean
                                 ? ((Boolean) isShowing).booleanValue()
@@ -938,8 +1156,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                     + " activity=" + activity.getClass().getName());
                 }
             };
-            XposedHelpers.findAndHookMethod(serviceClass, "show", visibilityHook);
-            XposedHelpers.findAndHookMethod(serviceClass, "hide", visibilityHook);
+            Xp.findAndHookMethod(serviceClass, "show", visibilityHook);
+            Xp.findAndHookMethod(serviceClass, "hide", visibilityHook);
             log("hooked Bilibili control container show/hide class="
                     + serviceClass.getName());
         } catch (Throwable throwable) {
@@ -1060,7 +1278,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static void log(String message) {
         String line = TAG + ": " + message;
-        XposedBridge.log(line);
+        Xp.log(line);
         Log.i(TAG, message);
     }
 }

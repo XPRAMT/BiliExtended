@@ -3,8 +3,6 @@ package dev.xpramt.bilisurfacebridge;
 import android.net.Uri;
 import android.util.Log;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedHelpers;
 
 /** Adapts the BiliRoamingX Story route rewrite to the official 9.13.0 LSPosed runtime. */
 final class StoryRouteHook {
@@ -39,22 +37,22 @@ final class StoryRouteHook {
         int installed = 0;
         StringBuilder failures = new StringBuilder();
         try {
-            Class<?> builder = XposedHelpers.findClass(
+            Class<?> builder = Xp.findClass(
                     "com.bilibili.lib.blrouter.RouteRequest$Builder", classLoader);
-            XposedHelpers.findAndHookConstructor(builder, Uri.class, new AndroidUriHook());
-            XposedHelpers.findAndHookConstructor(builder, String.class, new StringUriHook());
-            XposedHelpers.findAndHookMethod(builder, "build", new BuildHook());
+            Xp.findAndHookConstructor(builder, Uri.class, new AndroidUriHook());
+            Xp.findAndHookConstructor(builder, String.class, new StringUriHook());
+            Xp.findAndHookMethod(builder, "build", new BuildHook());
             installed += 3;
         } catch (Throwable failure) {
             failures.append(" legacy=").append(failure.getClass().getSimpleName());
         }
         try {
-            Class<?> internalUri = XposedHelpers.findClass(
+            Class<?> internalUri = Xp.findClass(
                     "com.bilibili.lib.brouter.uri.Uri", classLoader);
-            Class<?> builder = XposedHelpers.findClass(
+            Class<?> builder = Xp.findClass(
                     "com.bilibili.lib.brouter.api.internal.DefaultRouteRequest$a", classLoader);
-            Object companion = XposedHelpers.getStaticObjectField(internalUri, "Companion");
-            XposedHelpers.findAndHookConstructor(builder, internalUri,
+            Object companion = Xp.getStaticObjectField(internalUri, "Companion");
+            Xp.findAndHookConstructor(builder, internalUri,
                     new InternalUriHook(companion));
             installed++;
         } catch (Throwable failure) {
@@ -63,9 +61,9 @@ final class StoryRouteHook {
         return "Story route hooks=" + installed + failures;
     }
 
-    private static final class AndroidUriHook extends XC_MethodHook {
+    private static final class AndroidUriHook extends Xp.Hook {
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
+        protected void before(Xp.Param param) {
             Uri original = (Uri) param.args[0];
             if (original == null) {
                 return;
@@ -79,14 +77,14 @@ final class StoryRouteHook {
         }
 
         @Override
-        protected void afterHookedMethod(MethodHookParam param) {
+        protected void after(Xp.Param param) {
             markRewrittenRequest(param);
         }
     }
 
-    private static final class StringUriHook extends XC_MethodHook {
+    private static final class StringUriHook extends Xp.Hook {
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
+        protected void before(Xp.Param param) {
             String raw = (String) param.args[0];
             String rewritten = StoryRouteRewriter.rewrite(raw);
             if (raw != null && !raw.equals(rewritten)
@@ -97,12 +95,12 @@ final class StoryRouteHook {
         }
 
         @Override
-        protected void afterHookedMethod(MethodHookParam param) {
+        protected void after(Xp.Param param) {
             markRewrittenRequest(param);
         }
     }
 
-    private static final class InternalUriHook extends XC_MethodHook {
+    private static final class InternalUriHook extends Xp.Hook {
         private final Object companion;
 
         InternalUriHook(Object companion) {
@@ -110,7 +108,7 @@ final class StoryRouteHook {
         }
 
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
+        protected void before(Xp.Param param) {
             Object original = param.args[0];
             if (original == null) {
                 return;
@@ -118,31 +116,31 @@ final class StoryRouteHook {
             String raw = original.toString();
             String rewritten = StoryRouteRewriter.rewrite(raw);
             if (!raw.equals(rewritten) && ModulePreferences.loadReplaceStoryVideoForHook()) {
-                param.args[0] = XposedHelpers.callMethod(companion, "parse", rewritten);
+                param.args[0] = Xp.callMethod(companion, "parse", rewritten);
                 param.setObjectExtra(REWRITTEN_STORY_REQUEST, Boolean.TRUE);
             }
         }
 
         @Override
-        protected void afterHookedMethod(MethodHookParam param) {
+        protected void after(Xp.Param param) {
             markRewrittenRequest(param);
         }
     }
 
-    private static final class BuildHook extends XC_MethodHook {
+    private static final class BuildHook extends Xp.Hook {
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
-            if (!Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+        protected void before(Xp.Param param) {
+            if (!Boolean.TRUE.equals(Xp.getAdditionalInstanceField(
                     param.thisObject, REWRITTEN_STORY_REQUEST))) {
                 return;
             }
             try {
-                Object extras = XposedHelpers.callMethod(param.thisObject, "getExtras");
+                Object extras = Xp.callMethod(param.thisObject, "getExtras");
                 if (extras == null) {
                     return;
                 }
                 for (String key : STORY_CONTEXT_KEYS) {
-                    XposedHelpers.callMethod(extras, "remove", key);
+                    Xp.callMethod(extras, "remove", key);
                 }
                 Log.i("BiliExtended", "story route stripped Story context before build");
             } catch (Throwable failure) {
@@ -152,10 +150,10 @@ final class StoryRouteHook {
         }
     }
 
-    private static void markRewrittenRequest(XC_MethodHook.MethodHookParam param) {
+    private static void markRewrittenRequest(Xp.Param param) {
         if (Boolean.TRUE.equals(param.getObjectExtra(REWRITTEN_STORY_REQUEST))
                 && param.thisObject != null) {
-            XposedHelpers.setAdditionalInstanceField(
+            Xp.setAdditionalInstanceField(
                     param.thisObject, REWRITTEN_STORY_REQUEST, Boolean.TRUE);
         }
     }

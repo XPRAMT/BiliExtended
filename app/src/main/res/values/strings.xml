@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Bili Extended</string>
+    <string name="module_description">Bilibili playback smoothness and display tweaks. Settings live in Bilibili: open Bili Extended from the player menu.</string>
 </resources>

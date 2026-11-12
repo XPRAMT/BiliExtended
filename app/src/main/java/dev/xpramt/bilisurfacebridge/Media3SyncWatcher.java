@@ -1,6 +1,5 @@
 package dev.xpramt.bilisurfacebridge;
 
-import de.robv.android.xposed.XposedBridge;
 
 /**
  * Applies a change of the Media3 Vsync setting inside Bilibili's IJK service without restarting
@@ -25,9 +24,16 @@ final class Media3SyncWatcher {
             @Override
             public void run() {
                 boolean enabled = ModulePreferences.loadMedia3FrameSyncForHook();
-                while (true) {
+                float speedCap = ModulePreferences.loadSpeedCapLimitForHook();
+                while (Generation.alive()) {
                     try {
                         Thread.sleep(INTERVAL_MS);
+                        // 高倍速 switched in the in-player menu: the native ceiling follows within a second (0 pauses the lift, Bilibili's own cap again)
+                        float cap = ModulePreferences.loadSpeedCapLimitForHook();
+                        if (cap != speedCap) {
+                            speedCap = cap;
+                            Xp.log("BiliExtended: high speed switched while running: " + NativeRefreshCap.installSpeedCapLift(cap));
+                        }
                         boolean now = ModulePreferences.loadMedia3FrameSyncForHook();
                         if (now == enabled) {
                             continue;
@@ -38,7 +44,7 @@ final class Media3SyncWatcher {
                         } else {
                             Media3FrameSynchronizer.disableNativeScheduling();
                         }
-                        XposedBridge.log("BiliExtended: Media3 Vsync switched "
+                        Xp.log("BiliExtended: Media3 Vsync switched "
                                 + (now ? "on" : "off") + " while playing");
                     } catch (InterruptedException interrupted) {
                         return;
