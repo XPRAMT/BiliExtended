@@ -2901,6 +2901,10 @@ if (DebugLog.enabled()) {
     /**
      * Media3 FixedFrameRateEstimator adapted from the official matcher algorithm.
      *
+     * <p>Adapted from AndroidX Media3 1.8.1 (androidx/media3/exoplayer/video/FixedFrameRateEstimator.java),
+     * Copyright (C) 2020 The Android Open Source Project, licensed under the Apache License,
+     * Version 2.0 (see NOTICE).  Changed to work on IJK presentation times inside this class.</p>
+     *
      * <p>The previous implementation used a per-frame 3:1 EMA. That can publish a misleading
      * frame rate after a seek, loop boundary, or irregular timestamp. Media3 requires a stable
      * run of matching timestamps before using the estimate for release prediction and Surface

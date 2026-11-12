@@ -137,4 +137,4 @@ Module 229, Bilibili 9.18.0, offline downloads, `Surface external` renderer. **T
 
 ## License
 
-This project is licensed under [GPL-3.0](LICENSE).
+This project is licensed under [Apache-2.0](LICENSE). Parts of the frame scheduling are adapted from [AndroidX Media3](https://github.com/androidx/media) (Apache-2.0); see [NOTICE](NOTICE). Releases 1.0.0–1.5.0 were published under GPL-3.0.

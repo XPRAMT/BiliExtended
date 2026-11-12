@@ -2,7 +2,7 @@
 
 本文件記錄 Media3 決定「何時、以什麼時間戳」把解碼後的影片幀交給 Surface 的完整邏輯，作為 Bilibili IJK 修復的參考。內容直接來自原始碼，不靠記憶；每一條都附檔案與行號。
 
-- 原始碼：`https://github.com/androidx/media`
+- 原始碼：`https://github.com/androidx/media`（Copyright (C) 2020 The Android Open Source Project，Apache-2.0；本文件引用的片段依該授權使用，見 `NOTICE`）
 - 版本：tag **`1.8.1`**（commit `95ded8583289646a04488f2bf4fc5c8258f33289`）。選這個版本是因為 NX809J 上用來對照的 CX 檔案總管（`com.cxinventor.file.explorer`）內建 `AndroidXMedia3/1.8.1`。
 - 路徑前綴：`libraries/exoplayer/src/main/java/androidx/media3/exoplayer/`
 - 對照實測：CX 檔案總管播放 UFO Test 120／60，30 s Perfetto（trace 未收錄於儲存庫）

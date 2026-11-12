@@ -712,6 +712,9 @@ uint64_t monotonicNanos();
 
 
 // ---- Media3 1.8.1 port (docs/media3-reference.md) -----------------------------------------
+// Adapted from AndroidX Media3 1.8.1, Copyright (C) 2020 The Android Open Source Project,
+// licensed under the Apache License, Version 2.0 (see NOTICE).  Translated from Java to C++ and
+// changed to take IJK's timestamps and audio clock instead of a Media3 renderer's.
 // FixedFrameRateEstimator (exoplayer/video/FixedFrameRateEstimator.java): a matcher syncs once
 // more than 15 consecutive frame durations lie within 1 ms of the first one, and its frame
 // duration is the mean of the matched durations (8/9 ms millisecond-rounded PTS -> 8.333 ms).

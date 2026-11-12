@@ -1,0 +1,20 @@
+Bili Extended
+Copyright 2026 XPRAMT
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes code adapted from AndroidX Media3 1.8.1
+(https://github.com/androidx/media), Copyright (C) 2020 The Android Open Source Project,
+licensed under the Apache License, Version 2.0:
+
+- FixedFrameRateEstimator (libraries/exoplayer/src/main/java/androidx/media3/exoplayer/video/
+  FixedFrameRateEstimator.java): translated to Java and C++ in
+  app/src/main/java/dev/xpramt/bilisurfacebridge/Media3FrameSynchronizer.java and
+  app/src/main/cpp/native_refresh_cap.cpp.
+- Release-time rules and constants of VideoFrameReleaseHelper, VideoFrameReleaseControl and
+  MediaCodecVideoRenderer (same package): re-implemented in
+  app/src/main/cpp/native_refresh_cap.cpp for Bilibili's IJK player (timestamps come from IJK and
+  its audio clock instead of a Media3 renderer).
+- docs/media3-reference.md quotes short excerpts of these files for reference.
+
+The adapted parts were modified to run inside Bilibili's IJK player; see the comments at each place.
