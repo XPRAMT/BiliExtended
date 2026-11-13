@@ -11,7 +11,7 @@ android {
         applicationId 'dev.xpramt.bilisurfacebridge'
         minSdk 24
         targetSdk 35
-        versionCode 229
+        versionCode 231
         versionName '1.5.0'
 
         // Tells module generations apart in the log: every build gets its own marker.

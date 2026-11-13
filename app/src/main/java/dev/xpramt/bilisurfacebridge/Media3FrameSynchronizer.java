@@ -902,6 +902,9 @@ if (DebugLog.enabled()) {
 
     private static boolean releaseAtAdjustedTime(MediaCodec codec, int index, boolean render) {
         if (!render || !experimentsEnabled() || !ModulePreferences.loadMedia3FrameSyncForHook()) {
+            if (render && DebugLog.monitor()) {
+                markPassThroughRelease(codec, index);
+            }
             recordReleaseRequest(codec, index, render, "PASS_THROUGH", "feature-disabled-or-not-render");
             return false;
         }
@@ -2204,6 +2207,21 @@ if (DebugLog.enabled()) {
         String detail = "listenerPresent=" + (applicationListener != null)
                 + ";handler=" + (handler == null ? "null" : handler.getClass().getName())
                 + ";listenerGeneration=" + listenerGeneration;
+    }
+
+    /**
+     * Measurement only (DebugLog.monitor()): IJK releases this frame itself because Media3 Vsync is off (the "module features off" baseline, 2026-11-12).
+     * Write the same bsbR:<pts> mark the scheduled path writes, right BEFORE the original release, and keep the rate state file fresh, so the same batch
+     * and scorer measure the original player.  Nothing here changes the release.
+     */
+    private static void markPassThroughRelease(MediaCodec codec, int index) {
+        CodecState state = CODECS.get(codec);
+        FrameTiming timing = state == null ? null : peekTiming(state, index);
+        if (timing != null) {
+            emitReleaseMarkBeforeCall(timing.presentationTimeUs, false);
+            RELEASE_MARK_EMITTED.set(Boolean.FALSE);   // the PASS_THROUGH event below writes no R mark of its own
+        }
+        maybeReport(System.nanoTime());
     }
 
     private static void recordReleaseRequest(MediaCodec codec, int index, boolean render,

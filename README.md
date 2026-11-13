@@ -53,7 +53,8 @@ Each round records 15 s with root Perfetto in full-screen playback and looks onl
 - **Slot**: one refresh (VSync) of the panel. R = the measured panel refresh rate (slots per second), taken from the trace's VSYNC counters, not the nominal value.
 - **Interval**: how many slots separate two consecutive presented pictures (rounded to whole slots).
 - **F**: content frame rate × speed, i.e. how many different pictures should be shown per second.
-- **Actual frame rate F′**: source frame rate × actual playback rate. The actual playback rate is the slope of a linear fit of every presented picture's content timestamp against its presentation time in the analysis window. When a frame is dropped the next timestamp jumps ahead, so the slope does not change with drops.
+- **The actual playback rate is taken to equal the requested speed**: in the settled part, the slope of every presented picture's content timestamp against its presentation time deviates from the requested speed by at most 0.73 % (0.25x–2x, 78 rounds of the original player and the module), so the allowances use F directly and are not adjusted per round.
+- **Allowances are computed per round**: W and R are measured in that round, so the original player and the module (whose best rounds differ) can have different allowances for the same combination.
 - **W**: the length of the analysis window (seconds).
 
 ### Three cases
@@ -64,14 +65,14 @@ The ratio of F to R decides the case; each has its own pass condition.
 
 - **On-time rate** = intervals of exactly n slots ÷ all intervals.
 - **Longer** = intervals of more than n slots; **shorter** = intervals of fewer than n slots.
-- R / F′ is never exactly n, so a picture must now and then stay one slot longer (or shorter) to keep up with the audio; this is the physical limit:
-  - allowed longer = ⌈W × (R − F′ × n)⌉ + 1 (0 when the bracket is negative, then + 1)
-  - allowed shorter = ⌈W × (F′ × n − R)⌉ (0 when the bracket is negative)
+- R / F is never exactly n, so a picture must now and then stay one slot longer (or shorter) to keep up with the audio; this is the physical limit:
+  - allowed longer = ⌈W × (R − F × n)⌉ + 1 (0 when the bracket is negative, then + 1)
+  - allowed shorter = ⌈W × (F × n − R)⌉ (0 when the bracket is negative)
 - **Pass** = longer ≤ allowed longer and shorter ≤ allowed shorter. The on-time rate is only a ratio and does not decide the verdict by itself; low-frame-rate combinations have few intervals (about 120 in 8 s at 15 pictures per second), so a single longer interval lowers it by almost 1 %.
 
 **2. Dense: F / R is close to a whole number k ≥ 2**, e.g. 4K120 2x (2 pictures per slot), 1080p24 10x.
 
-- **Parity flip** = how often the content index of consecutive presented pictures changes parity (e.g. from even-numbered to odd-numbered pictures). Every dense combination in the tables shows 2 pictures per slot (F ≈ 240).
+- **Parity flip** = how often the content index of consecutive presented pictures changes parity (e.g. from even-numbered to odd-numbered pictures). Every dense combination in the table shows 2 pictures per slot (F ≈ 240).
 - **Pass** = 0 parity flips. Holding the same picture one more slot (the phase stays) is the physical limit and allowed.
 
 **3. Fractional**: every other ratio, e.g. 4K120 1.5x (3 pictures per 2 slots), 1080p30 3x.
@@ -79,64 +80,64 @@ The ratio of F to R decides the case; each has its own pass condition.
 - **Pacing deviation** = the largest distance of a presented picture from the ideal evenly spaced line (after removing a constant rate difference), in pictures or slots.
 - **Pass** = pacing deviation ≤ 1. A deviation of 1 is one visible hitch.
 
-**A round passes** when its settled part (from 5 s after playback starts) meets the condition of its case and the recording is complete. The "Result" column of the tables is this verdict.
+**A round passes** when its settled part (from 5 s after playback starts) meets the condition of its case and the recording is complete. The pass / fail in the table's "result (settled part)" columns is this verdict.
 
 ## Test results
 
-Module 229, Bilibili 9.18.0, offline downloads, `Surface external` renderer. **Tested in performance mode**: on the phone Bilibili is in game mode; on the tablet the minimum frequency of the big cluster (cpu4–6) is pinned at its maximum and every round checks before recording that the system is not throttling it. The fps overlay and the stream-format overlay were on during the tests (the slow-playback keepalive runs only while the fps overlay is on; see section 5 of [docs/beyond-media3.md](docs/beyond-media3.md)). Each combination ran 2–4 rounds; the table shows the best round (settled part).
+Module results use the `Surface external` renderer with the fps and stream-format overlays on; original-player results have the module's playback features off (see below) and both overlays off. Bilibili 9.18.0, offline downloads. **Tested in performance mode**: on the phone Bilibili is in game mode; on the tablet the minimum frequency of the big cluster (cpu4–6) is pinned at its maximum and every round checks before recording that the system is not throttling it. Each combination ran 2–4 rounds; the table shows the best round of each side (settled part).
 
 - **Content / panel frames**: content frames = source frame rate × speed, i.e. how many different pictures there are per second. Above the panel refresh rate the panel can show only one picture per refresh; the number in brackets is what the panel can show, e.g. `180 (120)`. No brackets means the panel can show them all.
 - **Measured frame rate**: new pictures the video layer actually presented per second in the settled part, from SurfaceFlinger's present records: (pictures − 1) ÷ time from the first to the last.
 
-**Phone**: Nubia NX809J (Snapdragon 8 Elite Gen 5, Android 16, panel measured at 120.28 Hz)
+- **Phone**: Nubia NX809J (Snapdragon 8 Elite Gen 5, Android 16, panel measured at 120.28 Hz). Both the original player and the module were tested (the original passes only 1 of 23 combinations, 4K 60 fps at 0.333x).
+- **Tablet**: Xiaomi Pad 6 Pro (Snapdragon 8+ Gen 1, HyperOS / Android 15, 120 Hz panel). Both the original player and the module were tested.
+- **Original**: every module feature that changes playback is off (Media3 Vsync, the performance-sampling block, immediate external rendering, the deeper picture queue, renderer selection and so on); only the speed setting, the speed-limit lift and the measurement marks stay, and the renderer is Bilibili's own default (external rendering). Scored the same way as the module.
 
-| Video | Speed | Content / panel frames (fps) | Measured frame rate (fps) | Result | Settled-part metric |
-| --- | --- | --- | --- | --- | --- |
-| 1080p 24 fps AV1 | 0.25x | 6 | 6.0 | Pass | on-time 97.50 % |
-| 1080p 24 fps AV1 | 0.333x | 8 | 8.0 | Pass | on-time 93.33 % |
-| 1080p 24 fps AV1 | 0.5x | 12 | 12.0 | Pass | on-time 97.85 % |
-| 1080p 24 fps AV1 | 1x | 24 | 24.0 | Pass | on-time 98.45 % |
-| 1080p 24 fps AV1 | 2x | 48 | 48.0 | Pass | pacing deviation 0.50 |
-| 1080p 24 fps AV1 | 10x | 240 (120) | 120.0 | Pass | parity flips 0 |
-| 4K 30 fps AV1 | 0.25x | 7.5 | 7.5 | Pass | on-time 94.55 % |
-| 4K 30 fps AV1 | 0.333x | 10 | 10.0 | Pass | on-time 96.10 % |
-| 4K 30 fps AV1 | 0.5x | 15 | 15.0 | Pass | on-time 98.33 % |
-| 4K 30 fps AV1 | 1x | 30 | 30.0 | Pass | on-time 99.19 % |
-| 4K 30 fps AV1 | 2x | 60 | 60.0 | Pass | on-time 99.39 % |
-| 4K 30 fps AV1 | 8x | 240 (120) | 120.1 | Pass | parity flips 0 |
-| 4K 60 fps AV1 | 0.25x | 15 | 15.0 | Pass | on-time 100.00 % |
-| 4K 60 fps AV1 | 0.333x | 20 | 20.0 | Pass | on-time 98.15 % |
-| 4K 60 fps AV1 | 0.5x | 30 | 30.0 | Pass | on-time 99.18 % |
-| 4K 60 fps AV1 | 1x | 60 | 60.0 | Pass | on-time 99.40 % |
-| 4K 60 fps AV1 | 2x | 120 | 120.0 | Pass | on-time 99.70 % |
-| 4K 60 fps AV1 | 4x | 240 (120) | 120.0 | Pass | parity flips 0 |
-| 4K 120 fps AVC | 0.25x | 30 | 30.1 | Pass | on-time 100.00 % |
-| 4K 120 fps AVC | 0.333x | 40 | 40.1 | Pass | on-time 99.70 % |
-| 4K 120 fps AVC | 0.5x | 60 | 60.0 | Pass | on-time 99.20 % |
-| 4K 120 fps AVC | 1x | 120 | 120.0 | Pass | on-time 99.70 % |
-| 4K 120 fps AVC | 2x | 240 (120) | 119.9 | Pass | parity flips 0 |
+| Device | Video | Speed | Content / panel frames (fps) | Original: measured frame rate (fps) | Original: result (settled part) | Module: measured frame rate (fps) | Module: result (settled part) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Phone | 1080p 24 fps AV1 | 0.25x | 6 | 5.8 | Fail: on-time 51.16 %, longer 12 / allowed 3 | 6.0 | Pass: on-time 97.50 %, longer 1 / allowed 4
+| Phone | 1080p 24 fps AV1 | 0.333x | 8 | 8.0 | Fail: on-time 41.38 %, longer 18 / allowed 5 | 8.0 | Pass: on-time 93.33 %, longer 4 / allowed 5
+| Phone | 1080p 24 fps AV1 | 0.5x | 12 | 12.0 | Fail: on-time 46.24 %, longer 25 / allowed 4 | 12.0 | Pass: on-time 97.85 %, longer 2 / allowed 4
+| Phone | 1080p 24 fps AV1 | 1x | 24 | 23.8 | Fail: on-time 70.71 %, longer 28 / allowed 4 | 24.0 | Pass: on-time 98.45 %, longer 3 / allowed 4
+| Phone | 1080p 24 fps AV1 | 2x | 48 | 47.2 | Fail: pacing deviation 4.31 | 48.0 | Pass: pacing deviation 0.50
+| Phone | 1080p 24 fps AV1 | 10x | 240 (120) | 115.6 | Fail: parity flips 337 | 120.0 | Pass: parity flips 0
+| Phone | 4K 30 fps AV1 | 0.25x | 7.5 | 7.1 | Fail: on-time 54.90 %, longer 8 / allowed 4 | 7.5 | Pass: on-time 94.55 %, longer 3 / allowed 4
+| Phone | 4K 30 fps AV1 | 0.333x | 10 | 10.0 | Fail: on-time 85.90 %, longer 7 / allowed 5 | 10.0 | Pass: on-time 96.10 %, longer 3 / allowed 5
+| Phone | 4K 30 fps AV1 | 0.5x | 15 | 15.0 | Fail: on-time 77.69 %, longer 15 / allowed 4 | 15.0 | Pass: on-time 98.33 %, longer 2 / allowed 5
+| Phone | 4K 30 fps AV1 | 1x | 30 | 30.0 | Fail: on-time 94.38 %, longer 8 / allowed 4 | 30.0 | Pass: on-time 99.19 %, longer 2 / allowed 4
+| Phone | 4K 30 fps AV1 | 2x | 60 | 58.4 | Fail: on-time 89.92 %, longer 32 / allowed 4 | 60.0 | Pass: on-time 99.39 %, longer 3 / allowed 5
+| Phone | 4K 30 fps AV1 | 8x | 240 (120) | 116.5 | Fail: parity flips 417 | 120.1 | Pass: parity flips 0
+| Phone | 4K 60 fps AV1 | 0.25x | 15 | 14.5 | Fail: on-time 47.86 %, longer 27 / allowed 4 | 15.0 | Pass: on-time 100.00 %, longer 0 / allowed 4
+| Phone | 4K 60 fps AV1 | 0.333x | 20 | 20.0 | Pass: on-time 98.73 %, longer 1 / allowed 3 | 20.0 | Pass: on-time 98.15 %, longer 3 / allowed 6
+| Phone | 4K 60 fps AV1 | 0.5x | 30 | 30.0 | Fail: on-time 93.38 %, longer 5 / allowed 3 | 30.0 | Pass: on-time 99.18 %, longer 2 / allowed 5
+| Phone | 4K 60 fps AV1 | 1x | 60 | 59.8 | Fail: on-time 96.81 %, longer 10 / allowed 4 | 60.0 | Pass: on-time 99.40 %, longer 3 / allowed 5
+| Phone | 4K 60 fps AV1 | 2x | 120 | 105.8 | Fail: on-time 85.96 %, longer 125 / allowed 4 | 120.0 | Pass: on-time 99.70 %, longer 3 / allowed 5
+| Phone | 4K 60 fps AV1 | 4x | 240 (120) | 118.3 | Fail: parity flips 273 | 120.0 | Pass: parity flips 0
+| Phone | 4K 120 fps AVC | 0.25x | 30 | 26.1 | Fail: on-time 61.54 %, longer 7 / allowed 2 | 30.1 | Pass: on-time 100.00 %, longer 0 / allowed 5
+| Phone | 4K 120 fps AVC | 0.333x | 40 | 39.8 | Fail: on-time 84.04 %, longer 29 / allowed 6 | 40.1 | Pass: on-time 99.70 %, longer 1 / allowed 6
+| Phone | 4K 120 fps AVC | 0.5x | 60 | 60.0 | Fail: on-time 85.60 %, longer 37 / allowed 4 | 60.0 | Pass: on-time 99.20 %, longer 4 / allowed 5
+| Phone | 4K 120 fps AVC | 1x | 120 | 107.8 | Fail: on-time 89.17 %, longer 98 / allowed 4 | 120.0 | Pass: on-time 99.70 %, longer 3 / allowed 5
+| Phone | 4K 120 fps AVC | 2x | 240 (120) | 118.3 | Fail: parity flips 184 | 119.9 | Pass: parity flips 0
+| Tablet | 4K 120 fps AVC | 0.25x | 30 | 25.1 | Fail: on-time 49.02 %, longer 66 / allowed 2 | 30.0 | Pass: on-time 100.00 %, longer 0 / allowed 1
+| Tablet | 4K 120 fps AVC | 0.333x | 40 | 39.8 | Fail: on-time 46.79 %, longer 86 / allowed 3 | 39.9 | Pass: on-time 99.39 %, longer 2 / allowed 3
+| Tablet | 4K 120 fps AVC | 0.5x | 60 | 60.0 | Fail: on-time 42.60 %, longer 129 / allowed 2 | 60.0 | Pass: on-time 100.00 %, longer 0 / allowed 2
+| Tablet | 4K 120 fps AVC | 1x | 120 | 112.6 | Fail: on-time 94.22 %, longer 54 / allowed 2 | 119.7 | Pass: on-time 99.90 %, longer 1 / allowed 1
+| Tablet | 4K 120 fps AVC | 1.25x | 150 (120) | 109.7 | Fail: pacing deviation 3.27 | 120.0 | Pass: pacing deviation 0.60 |
+| Tablet | 4K 120 fps AVC | 1.5x | 180 (120) | 111.4 | Fail (decoder hardware limit): pacing deviation 4.79 | 108.7 | Fail (decoder hardware limit): pacing deviation 3.56
+| Tablet | 4K 60 fps AVC | 0.25x | 15 | 14.3 | Fail: on-time 44.55 %, longer 32 / allowed 2 | 15.0 | Pass: on-time 100.00 %, longer 0 / allowed 2
+| Tablet | 4K 60 fps AVC | 0.333x | 20 | 19.7 | Fail: on-time 66.25 %, longer 29 / allowed 2 | 20.0 | Pass: on-time 99.38 %, longer 1 / allowed 3
+| Tablet | 4K 60 fps AVC | 0.5x | 30 | 30.0 | Fail: on-time 69.67 %, longer 37 / allowed 2 | 30.0 | Pass: on-time 100.00 %, longer 0 / allowed 2
+| Tablet | 4K 60 fps AVC | 1x | 60 | 59.9 | Fail: on-time 63.56 %, longer 90 / allowed 1 | 60.0 | Pass: on-time 100.00 %, longer 0 / allowed 2
+| Tablet | 4K 60 fps AVC | 1.5x | 90 | 88.0 | Fail: pacing deviation 3.56 | 90.0 | Pass: pacing deviation 0.35
+| Tablet | 4K 60 fps AVC | 2x | 120 | 116.2 | Fail: on-time 96.78 %, longer 31 / allowed 2 | 120.0 | Pass: on-time 100.00 %, longer 0 / allowed 2
+| Tablet | 4K 60 fps AVC | 3x | 180 (120) | 112.3 | Fail (decoder hardware limit): pacing deviation 8.28 | 107.5 | Fail (decoder hardware limit): pacing deviation 3.28
+| Tablet | 1080p 30 fps HEVC | 0.5x | 15 | 15.0 | Fail: on-time 77.78 %, longer 14 / allowed 2 | 15.0 | Pass: on-time 100.00 %, longer 0 / allowed 2
+| Tablet | 1080p 30 fps HEVC | 1x | 30 | 30.0 | Fail: on-time 89.39 %, longer 13 / allowed 2 | 30.0 | Pass: on-time 100.00 %, longer 0 / allowed 1
+| Tablet | 1080p 30 fps HEVC | 2x | 60 | 58.4 | Fail: on-time 64.93 %, longer 89 / allowed 1 | 60.0 | Pass: on-time 100.00 %, longer 0 / allowed 2
+| Tablet | 1080p 30 fps HEVC | 3x | 90 | 82.4 | Fail: pacing deviation 3.98 | 90.0 | Pass: pacing deviation 0.35
+| Tablet | 1080p 30 fps HEVC | 4x | 120 | 103.9 | Fail: on-time 86.01 %, longer 120 / allowed 2 | 120.0 | Pass: on-time 100.00 %, longer 0 / allowed 1
 
-**Tablet**: Xiaomi Pad 6 Pro (Snapdragon 8+ Gen 1, HyperOS / Android 15, 120 Hz panel)
-
-| Video | Speed | Content / panel frames (fps) | Measured frame rate (fps) | Result | Settled-part metric |
-| --- | --- | --- | --- | --- | --- |
-| 4K 120 fps AVC | 0.25x | 30 | 30.0 | Pass | on-time 100.00 % |
-| 4K 120 fps AVC | 0.333x | 40 | 39.9 | Pass | on-time 99.39 % |
-| 4K 120 fps AVC | 0.5x | 60 | 60.0 | Pass | on-time 100.00 % |
-| 4K 120 fps AVC | 1x | 120 | 119.7 | Pass | on-time 99.90 % |
-| 4K 120 fps AVC | 1.5x | 180 (120) | 108.7 | Fail (decoder hardware limit: 4K at 180 fps) | pacing deviation 3.56 |
-| 4K 60 fps AVC | 0.25x | 15 | 14.9 | Pass | on-time 96.64 % |
-| 4K 60 fps AVC | 0.333x | 20 | 20.0 | Pass | on-time 99.38 % |
-| 4K 60 fps AVC | 0.5x | 30 | 30.0 | Pass | on-time 100.00 % |
-| 4K 60 fps AVC | 1x | 60 | 60.0 | Pass | on-time 100.00 % |
-| 4K 60 fps AVC | 1.5x | 90 | 90.0 | Pass | pacing deviation 0.35 |
-| 4K 60 fps AVC | 2x | 120 | 120.0 | Pass | on-time 100.00 % |
-| 4K 60 fps AVC | 3x | 180 (120) | 107.5 | Fail (decoder hardware limit: 4K at 180 fps) | pacing deviation 3.28 |
-| 1080p 30 fps HEVC | 0.5x | 15 | 15.0 | Pass | on-time 100.00 % |
-| 1080p 30 fps HEVC | 1x | 30 | 30.0 | Pass | on-time 100.00 % |
-| 1080p 30 fps HEVC | 2x | 60 | 60.0 | Pass | on-time 100.00 % |
-| 1080p 30 fps HEVC | 3x | 90 | 90.0 | Pass | pacing deviation 0.35 |
-| 1080p 30 fps HEVC | 4x | 120 | 120.0 | Pass | on-time 100.00 % |
+Known limits: 4K at 180 pictures per second (1.5x, 3x) exceeds the tablet decoder's hardware capability; neither the original player nor the module passes.
 
 ## License
 

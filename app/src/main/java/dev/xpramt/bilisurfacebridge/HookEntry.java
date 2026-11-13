@@ -187,10 +187,10 @@ public final class HookEntry extends XposedModule {
                 for (Activity activity : activities(handover.get("streamOverlay"))) {
                     attachStreamOverlayToActivity(activity);
                 }
-                if (ModulePreferences.loadPlaybackDebugOverlayForHook()) {
-                    for (Activity activity : activities(handover.get("debugOverlay"))) {
-                        PlaybackDebugOverlay.show(activity, "");
-                    }
+                // Always, like attachDebugOverlayForPlayback: the overlay object also runs the slow-playback keepalive, which must not
+                // depend on the fps overlay switch (with the switch off the label just stays hidden).
+                for (Activity activity : activities(handover.get("debugOverlay"))) {
+                    PlaybackDebugOverlay.show(activity, "");
                 }
             }, 1500L);
             adopted += "overlays=" + activities(handover.get("streamOverlay")).size() + "/" + activities(handover.get("debugOverlay")).size();
