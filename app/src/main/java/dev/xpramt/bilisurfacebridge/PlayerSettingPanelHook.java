@@ -95,7 +95,6 @@ final class PlayerSettingPanelHook {
                 }
             }
             return "in-player settings panel hooked (" + build.getName() + "); "
-                    + SettingsDialogEntry.install(classLoader) + "; "
                     + SettingsPageEntry.install(classLoader);
         } catch (Throwable throwable) {
             return "in-player settings panel hook unavailable="
@@ -308,20 +307,49 @@ final class PlayerSettingPanelHook {
      * the shared component adapter's updateData(List of UIComponent); we add a
      * VideoSettingDescriptionComponent whose data is built like the "More playback settings" row.
      */
-    private static final class SettingsDialogEntry {
-        private static final String ADAPTER = "com.bilibili.app.gemini.ui.f";
-        // Mask bits of the data class's synthetic constructor: use the default for iconUrl (2),
-        // visible (8), description (16), title end icon (128), its click (512), badge (1024),
-        // the four colours and the exposure entry.
-        private static final int DEFAULTS = 2 | 8 | 16 | 128 | 512 | 1024
-                | 2048 | 4096 | 8192 | 16384 | 65536;
-        private static Object ourComponent;
+    /** The bottom-sheet entry; the adapter candidates come from {@link DexScan} (9.18 com.bilibili.app.gemini.ui.f, 9.19 ...ui.e). */
+    static String installDialogEntry(ClassLoader loader, List<String> adapters) {
+        return SettingsDialogEntry.install(loader, adapters);
+    }
 
-        static String install(ClassLoader loader) {
+    private static final class SettingsDialogEntry {
+        private static Object ourComponent;
+        private static volatile boolean dialogEntryLogged;
+
+        static String install(ClassLoader loader, List<String> adapters) {
             try {
-                final Class<?> adapter = Xp.findClassIfExists(ADAPTER, loader);
-                if (adapter == null) {
-                    return "settings dialog entry: adapter not found";
+                if (hostLoader == null) {
+                    return "settings dialog entry: in-player panel not hooked";
+                }
+                Xp.Hook updateHook = new Xp.Hook() {
+                    @Override
+                    protected void before(Xp.Param param) {
+                        try {
+                            insert(param);
+                        } catch (Throwable throwable) {
+                            logOnce("dialog-insert", throwable);
+                        }
+                    }
+                };
+                // Every RecyclerView.Adapter with updateData(List): insert() only acts on a list of the settings dialog's own rows
+                // (VideoSettingSwitch / VideoSettingDescription), so the other adapters pass through untouched.
+                int hooked = 0;
+                for (String name : adapters) {
+                    Class<?> adapter = Xp.findClassIfExists(name, loader);
+                    if (adapter == null) {
+                        continue;
+                    }
+                    for (java.lang.reflect.Method method : adapter.getDeclaredMethods()) {
+                        Class<?>[] ps = method.getParameterTypes();
+                        if ("updateData".equals(method.getName()) && ps.length == 1 && ps[0] == List.class
+                                && !java.lang.reflect.Modifier.isAbstract(method.getModifiers())) {
+                            Xp.hookMethod(method, updateHook);
+                            hooked++;
+                        }
+                    }
+                }
+                if (hooked == 0) {
+                    return "settings dialog entry: adapter not found (candidates " + adapters + ")";
                 }
                 Xp.hookAllMethods(android.app.Dialog.class, "show", new Xp.Hook() {
                     @Override
@@ -329,18 +357,7 @@ final class PlayerSettingPanelHook {
                         lastDialog = new WeakReference<>((android.app.Dialog) param.thisObject);
                     }
                 });
-                int hooked = Xp.hookAllMethods(adapter, "updateData",
-                        new Xp.Hook() {
-                            @Override
-                            protected void before(Xp.Param param) {
-                                try {
-                                    insert(param);
-                                } catch (Throwable throwable) {
-                                    logOnce("dialog-insert", throwable);
-                                }
-                            }
-                        }).size();
-                return "settings dialog entry hooked updateData=" + hooked;
+                return "settings dialog entry hooked updateData=" + hooked + " " + adapters;
             } catch (Throwable throwable) {
                 return "settings dialog entry unavailable=" + throwable.getClass().getSimpleName();
             }
@@ -381,11 +398,6 @@ final class PlayerSettingPanelHook {
                 return;
             }
             List<?> original = (List<?>) param.args[0];
-            if (hasTitle(original)) {
-                // The full-screen panel's rows go through this adapter too, and its own hook has
-                // already added the entry there.
-                return;
-            }
             int lastSwitch = -1;
             for (int index = 0; index < original.size(); index++) {
                 if (kind(original.get(index)).equals("switch")) {
@@ -393,6 +405,11 @@ final class PlayerSettingPanelHook {
                 }
             }
             if (lastSwitch < 0) {
+                return;   // not the settings dialog's rows (another adapter of the same shape)
+            }
+            if (hasTitle(original)) {
+                // The full-screen panel's rows go through this adapter too, and its own hook has
+                // already added the entry there.
                 return;
             }
             int anchor = -1;
@@ -411,6 +428,11 @@ final class PlayerSettingPanelHook {
             }
             List<Object> merged = new ArrayList<>(original);
             merged.add(anchor + 1, ourComponent);
+            if (!dialogEntryLogged) {
+                dialogEntryLogged = true;
+                Xp.log(TAG + ": settings dialog entry added at " + (anchor + 1) + " of " + merged.size() + " via "
+                        + param.method.getDeclaringClass().getName());
+            }
             param.args[0] = merged;
         }
 
@@ -450,7 +472,12 @@ final class PlayerSettingPanelHook {
             return false;
         }
 
-        /** A data object for our row, taking the arrow icon and style from the anchor row. */
+        /**
+         * A data object for our row: a field-by-field copy of the anchor row's data ("VideoSettingDescription(...)", which keeps its arrow
+         * icon, colours and style), with title, icon and click replaced and its exposure / badge cleared.  The fields are told apart by
+         * the property names Kotlin writes into toString ("title=", "onClick=", ...), never by position, name or constructor shape: 9.18 had
+         * a 17-argument constructor, 9.19 has 15 (R8 dropped constant ones), and the field names are obfuscated in both.
+         */
         private static Object copyData(Object anchorComponent) throws Exception {
             Object anchorData = null;
             for (Field field : anchorComponent.getClass().getDeclaredFields()) {
@@ -463,45 +490,128 @@ final class PlayerSettingPanelHook {
             if (anchorData == null) {
                 throw new IllegalStateException("anchor data missing");
             }
+            Class<?> dataClass = anchorData.getClass();
             List<Field> fields = new ArrayList<>();
-            for (Field field : anchorData.getClass().getDeclaredFields()) {
+            for (Field field : dataClass.getDeclaredFields()) {
                 if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
                     field.setAccessible(true);
                     fields.add(field);
                 }
             }
-            // Declaration order = constructor order: ... endIconUrl, endIconRes, ..., style, expose.
-            Object endIconRes = fields.get(6).get(anchorData);
-            Object style = fields.get(15).get(anchorData);
-            java.lang.reflect.Constructor<?> constructor = null;
-            for (java.lang.reflect.Constructor<?> candidate
-                    : anchorData.getClass().getConstructors()) {
-                if (candidate.getParameterTypes().length == 17) {
-                    constructor = candidate;
-                }
+            Object copy = allocate(dataClass);
+            for (Field field : fields) {
+                field.set(copy, field.get(anchorData));
             }
-            if (constructor == null) {
-                throw new IllegalStateException("data constructor missing");
-            }
+            java.util.Map<String, Field> byLabel = labelFields(copy, fields);
             Object onClick = function0(new Runnable() {
                 @Override
                 public void run() {
                     openFromDialog();
                 }
             });
-            Object[] args = new Object[17];
-            args[0] = ROW_TITLE;
-            args[1] = "";
-            args[2] = ROW_ICON;
-            args[5] = endIconRes;
-            args[7] = onClick;
-            args[10] = 0;
-            args[11] = 0;
-            args[12] = 0;
-            args[13] = 0;
-            args[14] = style;
-            args[16] = DEFAULTS;
-            return constructor.newInstance(args);
+            if (!byLabel.containsKey("title") || !byLabel.containsKey("onClick")) {
+                throw new IllegalStateException("title/onClick not found in " + byLabel.keySet());
+            }
+            byLabel.get("title").set(copy, ROW_TITLE);
+            byLabel.get("onClick").set(copy, onClick);
+            setIfPresent(byLabel, copy, "iconUrl", "");
+            setIfPresent(byLabel, copy, "iconRes", ROW_ICON);
+            setIfPresent(byLabel, copy, "onTitleEndIconClick", null);
+            setIfPresent(byLabel, copy, "titleEndIconRes", null);
+            setIfPresent(byLabel, copy, "badgeInfo", null);
+            setIfPresent(byLabel, copy, "exposeEntry", null);
+            return copy;
+        }
+
+        private static void setIfPresent(java.util.Map<String, Field> byLabel, Object target, String label, Object value) {
+            Field field = byLabel.get(label);
+            if (field == null || (value == null && field.getType().isPrimitive())) {
+                return;
+            }
+            try {
+                field.set(target, value);
+            } catch (Throwable ignored) {
+                // type mismatch: keep the anchor's value
+            }
+        }
+
+        /** An instance without running a constructor (the copy is filled field by field). */
+        private static Object allocate(Class<?> type) throws Exception {
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            return unsafeClass.getMethod("allocateInstance", Class.class).invoke(theUnsafe.get(null), type);
+        }
+
+        /**
+         * toString property name -> field, found by probing: each field is set to a value whose text is unique (a String or int marker,
+         * an interface proxy whose toString is the marker, or null for any other non-null object), toString is read, the property whose
+         * value changed is taken, and the field is put back.
+         */
+        private static java.util.Map<String, Field> labelFields(Object target, List<Field> fields) throws Exception {
+            java.util.Map<String, Field> out = new java.util.HashMap<>();
+            String base = String.valueOf(target);
+            for (int i = 0; i < fields.size(); i++) {
+                Field field = fields.get(i);
+                Class<?> type = field.getType();
+                Object original = field.get(target);
+                final String marker = "BsbProbe" + i + "x";
+                Object probe;
+                boolean byMarker = true;
+                if (type == String.class) {
+                    probe = marker;
+                } else if (type == int.class) {
+                    probe = 735190000 + i;
+                } else if (type.isInterface()) {
+                    probe = Proxy.newProxyInstance(type.getClassLoader() != null ? type.getClassLoader() : hostLoader, new Class<?>[]{type},
+                            (proxy, method, args) -> {
+                                if ("toString".equals(method.getName())) return marker;
+                                if ("hashCode".equals(method.getName())) return 0;
+                                if ("equals".equals(method.getName())) return proxy == args[0];
+                                return null;
+                            });
+                } else if (!type.isPrimitive() && original != null) {
+                    probe = null;
+                    byMarker = false;
+                } else {
+                    continue;
+                }
+                String text;
+                try {
+                    field.set(target, probe);
+                    text = String.valueOf(target);
+                } finally {
+                    field.set(target, original);
+                }
+                int at;
+                if (byMarker) {
+                    String needle = type == int.class ? String.valueOf(735190000 + i) : marker;
+                    at = text.indexOf("=" + needle);
+                } else {
+                    at = -1;
+                    int n = Math.min(text.length(), base.length());
+                    for (int k = 0; k < n; k++) {
+                        if (text.charAt(k) != base.charAt(k)) {
+                            at = text.lastIndexOf('=', k);
+                            if (at < 0 || !text.startsWith("null", at + 1)) {
+                                at = -1;   // the change did not start at a property value: ambiguous, skip
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (at <= 0) {
+                    continue;
+                }
+                int start = at;
+                while (start > 0 && Character.isJavaIdentifierPart(text.charAt(start - 1))) {
+                    start--;
+                }
+                if (start < at) {
+                    out.put(text.substring(start, at), field);
+                }
+            }
+            return out;
         }
 
         /** The bottom sheet's content area on screen (view id content_layout), or null. */

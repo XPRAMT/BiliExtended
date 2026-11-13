@@ -4,7 +4,7 @@
 
 給官方 Bilibili Android App（`tv.danmaku.bili`）用的 LSPosed 模組。它修正 Bilibili 內建 IJK 播放器在高幀率與倍速播放時的微卡頓，讓你選擇影片詳情頁播放器的渲染器、解除倍速上限、在畫面上顯示實際的影音格式，並可自動挑選最佳音軌。不修改官方 APK，全部在執行期 Hook。
 
-- 支援 Bilibili 9.13.0、9.17.0、9.18.0（原生 Hook 會核對 IJK 函式庫的特徵，對不上就不掛鉤；其他版本只有部分 Java 功能可用）。
+- 支援 Bilibili 9.13.0、9.17.0、9.18.0、9.19.0（原生 Hook 會核對 IJK 函式庫的特徵，對不上就不掛鉤；其他版本只有部分 Java 功能可用）。
 - 需要能載入新版 Xposed API（libxposed **API 102**）模組的框架，例如 LSPosed 2.2.x；Android 7.0／API 24 以上。
 - 寫給 Bilibili 播放器工程師的根因分析與修復指引：[docs/bilibili-fix-guide.md](docs/bilibili-fix-guide.md)；Media3 之外另外加的機制（相位鎖定、節奏鎖定等）與實測改善：[docs/beyond-media3.md](docs/beyond-media3.md)。
 

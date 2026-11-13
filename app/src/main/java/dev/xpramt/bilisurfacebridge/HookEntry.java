@@ -98,6 +98,8 @@ public final class HookEntry extends XposedModule {
     /** Bilibili's class loader and data folder the hooks were installed with: what a hot-reloaded generation needs to install them again. */
     private ClassLoader installedLoader;
     private String installedDataDir;
+    /** Bilibili's base APK: {@link DexScan} reads its dex tables to find obfuscated classes by shape. */
+    private String installedSourceDir;
 
     /**
      * Hot reload (autoHotReload=true): a new module version installed while Bilibili runs takes over without restarting it.
@@ -123,6 +125,7 @@ public final class HookEntry extends XposedModule {
         handover.put("loader", installedLoader);
         handover.put("hookedMethods", Xp.hookedMethods());
         handover.put("dataDir", installedDataDir);
+        handover.put("sourceDir", installedSourceDir);
         Generation.retire();
         Generation.runQuietly(() -> Media3FrameSynchronizer.exportForHotReload(handover));
         Generation.runQuietly(BiliSettings::flushNow);
@@ -166,6 +169,7 @@ public final class HookEntry extends XposedModule {
         final java.util.Map<?, ?> handover = (java.util.Map<?, ?>) saved;
         installedLoader = (ClassLoader) handover.get("loader");
         installedDataDir = (String) handover.get("dataDir");
+        installedSourceDir = (String) handover.get("sourceDir");
         BiliSettings.init(installedDataDir);
         install(processName, installedLoader);
         String adopted = "";
@@ -228,6 +232,7 @@ public final class HookEntry extends XposedModule {
             return;
         }
         installedDataDir = param.getApplicationInfo() == null ? null : param.getApplicationInfo().dataDir;
+        installedSourceDir = param.getApplicationInfo() == null ? null : param.getApplicationInfo().sourceDir;
         BiliSettings.init(installedDataDir);
         installedLoader = param.getClassLoader();
         install(processName, installedLoader);
@@ -279,9 +284,9 @@ public final class HookEntry extends XposedModule {
         // exists, so a load-time check would always see the default.
         if (TARGET_PACKAGE.equals(processName) && (off & 8) == 0) {
             logOnce("replace-story-video", StoryRouteHook.install(classLoader));
-            logOnce("speed-menu", SpeedMenuHook.install(classLoader));
             logOnce("player-settings-panel",
                     PlayerSettingPanelHook.install(classLoader));
+            installShapeFoundHooks(classLoader);
         }
         if ((off & 16) == 0) {
             hookIjkDisplayFrameCounter(classLoader);
@@ -289,6 +294,56 @@ public final class HookEntry extends XposedModule {
             hookRenderContainer(classLoader);
             hookPlaybackActivityLifecycle(classLoader);
         }
+    }
+
+    /**
+     * Hooks whose targets are obfuscated and renamed between versions (speed menu, its row adapter, the settings dialog adapter): found by
+     * shape in the APK's dex tables (DexScan).  With a cache for this APK they are installed right away; otherwise the scan (a few seconds,
+     * first start after a Bilibili update only) runs on a background thread and the hooks go in when it is done.
+     */
+    private void installShapeFoundHooks(final ClassLoader classLoader) {
+        final String dataDir = installedDataDir;
+        if (installedSourceDir == null) {
+            // Hand-over from a generation that did not pass the APK path (module 231 and older): ask Bilibili's own Application.
+            try {
+                Object app = Class.forName("android.app.ActivityThread").getMethod("currentApplication").invoke(null);
+                if (app instanceof android.content.Context) {
+                    installedSourceDir = ((android.content.Context) app).getApplicationInfo().sourceDir;
+                }
+            } catch (Throwable ignored) {
+                // stays null
+            }
+        }
+        final String sourceDir = installedSourceDir;
+        if (sourceDir == null) {
+            log("shape scan unavailable: no APK path");
+            return;
+        }
+        DexScan.Result cached = DexScan.cached(dataDir, sourceDir);
+        if (cached != null) {
+            installFromScan(classLoader, cached);
+            return;
+        }
+        Thread thread = new Thread(() -> {
+            try {
+                DexScan.Result result = DexScan.scan(sourceDir);
+                if (!Generation.alive()) {
+                    return;
+                }
+                DexScan.save(dataDir, sourceDir, result);
+                installFromScan(classLoader, result);
+            } catch (Throwable throwable) {
+                log("shape scan failed=" + throwable.getClass().getSimpleName() + " " + throwable.getMessage());
+            }
+        }, "BiliExtended-dexscan");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private void installFromScan(ClassLoader classLoader, DexScan.Result result) {
+        log("shape scan " + result.summary());
+        log(SpeedMenuHook.install(classLoader, result));
+        log(PlayerSettingPanelHook.installDialogEntry(classLoader, result.get(DexScan.SETTINGS_ADAPTER)));
     }
 
     private void hookIjkDisplayFrameCounter(ClassLoader classLoader) {
@@ -416,20 +471,9 @@ public final class HookEntry extends XposedModule {
         }
         try {
             final Class<?> playerClass = Xp.findClass(IJK_PLAYER, classLoader);
-            Xp.Hook optionHook = new Xp.Hook() {
-                @Override
-                protected void before(Xp.Param param) {
-                    try {
-                        Xp.callMethod(param.thisObject, "_setOptionLong", 4,
-                                "video-pictq-size", 2L);
-                        logOnce("ijk-pictq-size:" + param.method.getName(),
-                                "IJK video-pictq-size set to 2 before " + param.method.getName());
-                    } catch (Throwable throwable) {
-                        logOnce("ijk-pictq-size-failed", "IJK video-pictq-size option failed="
-                                + throwable.getClass().getSimpleName());
-                    }
-                }
-            };
+            // (2026-11-13) A second hook on prepareAsync / _prepareAsync / setIjkMediaPlayerItem used to call the absent _setOptionLong to
+            // set the queue to 2 -- a value IJK rejects (see above) -- and only ever logged NoSuchMethodError; removed.  The queue depth that
+            // takes effect is the ijkservice's native default patch (applyExperiments, "video-pictq-size default=min=...").
             StringBuilder names = new StringBuilder();
             for (java.lang.reflect.Method method : playerClass.getDeclaredMethods()) {
                 String name = method.getName().toLowerCase(java.util.Locale.ROOT);
@@ -504,10 +548,7 @@ public final class HookEntry extends XposedModule {
                 logOnce("ijk-item-class", "IjkMediaPlayerItem unavailable="
                         + throwable.getClass().getSimpleName());
             }
-            for (String name : new String[] {"prepareAsync", "_prepareAsync", "setIjkMediaPlayerItem"}) {
-                hooked += Xp.hookAllMethods(playerClass, name, optionHook).size();
-            }
-            log("hooked IjkMediaPlayer prepare paths for picture queue size=" + hooked);
+            log("hooked IjkMediaPlayer setOption for picture queue size=" + hooked);
         } catch (Throwable throwable) {
             log("picture queue size hook unavailable: " + throwable.getClass().getSimpleName());
         }

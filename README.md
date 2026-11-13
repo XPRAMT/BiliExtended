@@ -4,7 +4,7 @@
 
 An LSPosed module for the official Bilibili Android app (`tv.danmaku.bili`). It fixes the micro-stutter of Bilibili's built-in IJK player at high frame rates and playback speeds, lets you choose the renderer of the video-detail player, lifts the speed limit, shows the actual video and audio format on screen, and can pick the best audio track automatically. The official APK is not modified; everything is hooked at runtime.
 
-- Supports Bilibili 9.13.0, 9.17.0 and 9.18.0 (the native hooks check the IJK library's signatures and stay off when they do not match; other versions get only part of the Java features).
+- Supports Bilibili 9.13.0, 9.17.0, 9.18.0 and 9.19.0 (the native hooks check the IJK library's signatures and stay off when they do not match; other versions get only part of the Java features).
 - Needs a framework that loads modules of the modern Xposed API (libxposed **API 102**), for example LSPosed 2.2.x; Android 7.0 / API 24 or later.
 - Root-cause analysis and fix guide for Bilibili's player engineers (in Chinese): [docs/bilibili-fix-guide.md](docs/bilibili-fix-guide.md); the mechanisms added beyond Media3 (phase lock, cadence lock and others) and their measured gains (in Chinese): [docs/beyond-media3.md](docs/beyond-media3.md).
 
