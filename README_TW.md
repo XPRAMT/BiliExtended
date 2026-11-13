@@ -141,4 +141,4 @@
 
 ## 授權
 
-本專案以 [Apache-2.0](LICENSE) 授權。幀排程的部分程式碼改寫自 [AndroidX Media3](https://github.com/androidx/media)（Apache-2.0），見 [NOTICE](NOTICE)。1.0.0～1.5.0 的發布版以 GPL-3.0 授權。
+本專案以 [Apache-2.0](LICENSE) 授權。幀排程的部分程式碼改寫自 [AndroidX Media3](https://github.com/androidx/media)（Apache-2.0），見 [NOTICE](NOTICE)。1.0.0～1.3.2 與最初的 1.5.0（versionCode 229）以 GPL-3.0 授權。
