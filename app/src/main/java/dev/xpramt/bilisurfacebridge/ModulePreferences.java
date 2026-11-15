@@ -253,6 +253,18 @@ final class ModulePreferences {
         return Math.max(MIN_OVERLAY_TEXT_SIZE_SP, Math.min(MAX_OVERLAY_TEXT_SIZE_SP, sp));
     }
 
+    static final String KEY_AUTO_UPDATE_CHECK = "auto_update_check";
+    static final boolean DEFAULT_AUTO_UPDATE_CHECK = true;
+
+    /** Check GitHub for a newer module release when Bilibili starts (UpdateCheck). */
+    static boolean loadAutoUpdateCheckForHook() {
+        try {
+            return hookPreferences().getBoolean(KEY_AUTO_UPDATE_CHECK, DEFAULT_AUTO_UPDATE_CHECK);
+        } catch (Throwable ignored) {
+            return DEFAULT_AUTO_UPDATE_CHECK;
+        }
+    }
+
     static boolean loadReplaceStoryVideoForHook() {
         try {
             return hookPreferences().getBoolean(

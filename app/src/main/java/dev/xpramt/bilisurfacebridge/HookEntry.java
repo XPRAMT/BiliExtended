@@ -287,6 +287,7 @@ public final class HookEntry extends XposedModule {
             logOnce("player-settings-panel",
                     PlayerSettingPanelHook.install(classLoader));
             installShapeFoundHooks(classLoader);
+            UpdateCheck.start(installedDataDir);
         }
         if ((off & 16) == 0) {
             hookIjkDisplayFrameCounter(classLoader);
@@ -1134,6 +1135,7 @@ public final class HookEntry extends XposedModule {
                         protected void after(Xp.Param param) {
                             if (param.thisObject instanceof Activity) {
                                 attachStreamOverlayToActivity((Activity) param.thisObject);
+                                UpdateCheck.onActivityResumed((Activity) param.thisObject);
                             }
                         }
                     });

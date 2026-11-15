@@ -160,7 +160,21 @@ final class InPlayerSettingsPanel {
         overlay(card(content, "資訊浮層"));
         audio(card(content, "音訊"));
         behaviour(card(content, "頁面行為"));
+        updates(card(content, "更新"));
         return root;
+    }
+
+    private void updates(LinearLayout card) {
+        switchRow(card, "自動檢查更新", "開啟 Bilibili 時向 GitHub 查詢 Bili Extended 新版（最多每 24 小時一次）；有新版時提示。",
+                ModulePreferences.loadAutoUpdateCheckForHook(),
+                ModulePreferences.KEY_AUTO_UPDATE_CHECK, null);
+        startRow(card);
+        TextView button = text("立即檢查（目前 " + BuildConfig.VERSION_NAME + "）", 16, PRIMARY);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(dp(44));
+        button.setBackground(rounded(CHIP, 22));
+        button.setOnClickListener(v -> UpdateCheck.checkNow(activity));
+        card.addView(button, matchWrap(4));
     }
 
     private void smoothness(LinearLayout card) {
@@ -237,7 +251,7 @@ final class InPlayerSettingsPanel {
 
     private void speed(LinearLayout card) {
         switchRow(card, "高倍速（最高 10x）",
-                "解除播放核心的倍速上限（原本 60 fps 以上最高 2x、其餘 3x），並在倍速選單最前面加入 10x～2.5x；約 1 秒後生效，倍速選單下次打開時更新。高幀率或 4K 的高倍速可能解碼不及。",
+                "解除播放核心的倍速上限（原本 60 fps 以上最高 2x、其餘 3x），並把全螢幕倍速選單換成 0.25x～10x 的垂直拉桿；約 1 秒後生效，倍速選單下次打開時更新。高幀率或 4K 的高倍速可能解碼不及。",
                 ModulePreferences.loadHighSpeedForHook(),
                 ModulePreferences.KEY_HIGH_SPEED, null);
         float longPress = ModulePreferences.loadLongPressSpeedOverrideForHook();

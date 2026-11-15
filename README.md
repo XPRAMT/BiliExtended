@@ -20,13 +20,14 @@ Every setting is changed **inside Bilibili**, in the entry **Bili Extended**, wh
 | Smoothness | **How late behind the audio a frame may be dropped** (default 30 ms) | A frame may be dropped only when it is later than this behind the audio; 1–50 ms. |
 | Smoothness | **Surface for HDR videos** (on by default) | HDR videos switch to the direct `Surface` so the HDR metadata reaches the display (the external renderer turns HDR into SDR). |
 | Smoothness | **Native-resolution output** (off by default; shown only on screens whose panel resolution is higher than the UI's) | The video goes to the display hardware at the panel's native resolution; the rest of the UI keeps its size. |
-| Speed | **High speeds (up to 10x)** | Lifts the playback core's speed limit and adds 2.5x–10x at the top of the speed menu and the slow speeds 0.33x and 0.25x at the bottom. High speeds of high-frame-rate or 4K videos can exceed the decoder. |
+| Speed | **High speeds (up to 10x)** | Lifts the playback core's speed limit and turns the full-screen speed menu into a vertical slider: 19 stops from 0.25x to 10x (0.25, 0.33, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0–10.0), applied when the finger lifts. High speeds of high-frame-rate or 4K videos can exceed the decoder. |
 | Speed | **Long-press speed** | 2–10x (in 0.5x steps); Bilibili's 3x when not changed. |
 | Info overlay | **fps overlay** | Shows `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext`: Media3 Vsync state, average fps, 1% low and renderer. |
 | Info overlay | **Video / audio format** | The video format the decoder confirmed and the selected audio format (e.g. `HEVC \| Hi-Res 96KHz`). |
 | Info overlay | **Position and font size** | Horizontal / vertical position of the overlay (one pair for landscape, one for portrait) and its font size. |
 | Audio | **Pick the best audio quality** | Picks the highest-bandwidth track when separate DASH audio tracks exist. |
 | Page behaviour | **Open vertical Story videos in the normal video page** | Re-routes `bilibili://story` links to the normal video page. |
+| Updates | **Check for updates automatically** (on by default) | When Bilibili starts, asks GitHub for a newer release (at most once every 24 hours) and offers it: open the download page, skip this version or remind later; "Check now" in the panel checks right away. |
 
 The module also disables, by default, the performance sampling built into Bilibili's player: it shares the thread that delivers new-frame notifications, and each sample freezes the picture for 80–144 ms (see section B.5 of the fix guide).
 

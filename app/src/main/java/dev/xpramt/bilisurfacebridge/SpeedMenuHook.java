@@ -139,6 +139,7 @@ final class SpeedMenuHook {
                             && void.class.equals(method.getReturnType()) && !Modifier.isStatic(method.getModifiers())) {
                         Xp.hookMethod(method, new SelectionHook());
                         hooked++;
+                        out.append(SpeedSlider.install(candidate));
                         try {
                             Xp.hookMethod(candidate.getDeclaredMethod("onClick",
                                     android.view.View.class), new Xp.Hook() {
@@ -176,6 +177,12 @@ final class SpeedMenuHook {
      * the player ran 0.25, the panel still reported ~1/3), so a nearby report is taken as this.
      */
     private static volatile float lastPicked = Float.NaN;
+
+    /** A speed picked outside the list rows (the slider): treated like a row click. */
+    static void notePicked(float speed) {
+        lastPicked = speed;
+    }
+
     /** The adapter's own row class, learnt from the first speed list it was given. */
     private static volatile Class<?> rowClass;
     private static volatile boolean selectionLogged;
@@ -213,6 +220,7 @@ final class SpeedMenuHook {
                 if (!Float.isNaN(picked) && Math.abs(current - picked) < 0.1f) {
                     current = picked;
                 }
+                SpeedSlider.noteCurrent(param.thisObject, current);
                 for (Field f : param.thisObject.getClass().getDeclaredFields()) {
                     if (Modifier.isStatic(f.getModifiers()) || !List.class.isAssignableFrom(f.getType())) {
                         continue;
