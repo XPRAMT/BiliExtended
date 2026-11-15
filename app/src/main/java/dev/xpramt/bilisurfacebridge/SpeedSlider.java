@@ -18,7 +18,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 /**
- * Replaces the full-screen speed menu's list with a vertical slider (user 2026-11-15): 19 evenly spaced stops
+ * Replaces the full-screen speed menu's list with a vertical slider (user 2026-11-15): 20 evenly spaced stops
  * ({@link SpeedSliderScale#STOPS}), 10x at the top, applied when the finger lifts.
  *
  * <p>Where: when one of the speed-menu adapters (found by {@link DexScan}) is attached to its RecyclerView, the list is made invisible

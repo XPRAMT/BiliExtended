@@ -6,7 +6,7 @@ import java.util.Locale;
 final class SpeedSliderScale {
     /** Bottom to top. 1/3 is the exact float 1.0f / 3.0f, shown as "0.33X". */
     static final float[] STOPS = {
-            0.25f, SpeedMenuItems.ONE_THIRD, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f,
+            0.1f, 0.25f, SpeedMenuItems.ONE_THIRD, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f,
             3.0f, 3.5f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
 
     private SpeedSliderScale() {

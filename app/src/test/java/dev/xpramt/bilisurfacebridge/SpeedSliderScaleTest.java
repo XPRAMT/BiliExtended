@@ -7,7 +7,7 @@ import org.junit.Test;
 public class SpeedSliderScaleTest {
     @Test
     public void stopsAsRequested() {
-        float[] expected = {0.25f, 1f / 3f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 3.5f, 4f, 5f, 6f, 7f, 8f, 9f, 10f};
+        float[] expected = {0.1f, 0.25f, 1f / 3f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 3.5f, 4f, 5f, 6f, 7f, 8f, 9f, 10f};
         assertEquals(expected.length, SpeedSliderScale.STOPS.length);
         for (int i = 0; i < expected.length; i++) {
             assertEquals(expected[i], SpeedSliderScale.STOPS[i], 0.0001f);
@@ -16,6 +16,7 @@ public class SpeedSliderScaleTest {
 
     @Test
     public void labels() {
+        assertEquals("0.1X", SpeedSliderScale.label(0.1f));
         assertEquals("0.25X", SpeedSliderScale.label(0.25f));
         assertEquals("0.33X", SpeedSliderScale.label(1f / 3f));
         assertEquals("0.5X", SpeedSliderScale.label(0.5f));
@@ -40,9 +41,10 @@ public class SpeedSliderScaleTest {
 
     @Test
     public void nearest() {
-        assertEquals(4, SpeedSliderScale.nearestIndex(1.0f));
-        assertEquals(1, SpeedSliderScale.nearestIndex(0.3333f));
-        assertEquals(18, SpeedSliderScale.nearestIndex(10f));
-        assertEquals(7, SpeedSliderScale.nearestIndex(1.74f));
+        assertEquals(5, SpeedSliderScale.nearestIndex(1.0f));
+        assertEquals(2, SpeedSliderScale.nearestIndex(0.3333f));
+        assertEquals(0, SpeedSliderScale.nearestIndex(0.1f));
+        assertEquals(19, SpeedSliderScale.nearestIndex(10f));
+        assertEquals(8, SpeedSliderScale.nearestIndex(1.74f));
     }
 }

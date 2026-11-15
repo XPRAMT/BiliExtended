@@ -251,7 +251,7 @@ final class InPlayerSettingsPanel {
 
     private void speed(LinearLayout card) {
         switchRow(card, "高倍速（最高 10x）",
-                "解除播放核心的倍速上限（原本 60 fps 以上最高 2x、其餘 3x），並把全螢幕倍速選單換成 0.25x～10x 的垂直拉桿；約 1 秒後生效，倍速選單下次打開時更新。高幀率或 4K 的高倍速可能解碼不及。",
+                "解除播放核心的倍速上限（原本 60 fps 以上最高 2x、其餘 3x），並把全螢幕倍速選單換成 0.1x～10x 的垂直拉桿；約 1 秒後生效，倍速選單下次打開時更新。高幀率或 4K 的高倍速可能解碼不及。",
                 ModulePreferences.loadHighSpeedForHook(),
                 ModulePreferences.KEY_HIGH_SPEED, null);
         float longPress = ModulePreferences.loadLongPressSpeedOverrideForHook();
