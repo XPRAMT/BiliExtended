@@ -4,8 +4,12 @@
 
 An LSPosed module for the official Bilibili Android app (`tv.danmaku.bili`). It fixes the micro-stutter of Bilibili's built-in IJK player at high frame rates and playback speeds, lets you choose the renderer of the video-detail player, lifts the speed limit, shows the actual video and audio format on screen, and can pick the best audio track automatically. The official APK is not modified; everything is hooked at runtime.
 
-- Supports Bilibili 9.13.0, 9.17.0, 9.18.0, 9.19.0 and 9.20.0 (the native hooks check the IJK library's signatures and stay off when they do not match; other versions get only part of the Java features).
-- Needs a framework that loads modules of the modern Xposed API (libxposed **API 102**), for example LSPosed 2.2.x; Android 7.0 / API 24 or later.
+**The problem in the official app**: its pictures are not aligned with the screen's refresh rhythm, so high-frame-rate videos do not look smooth and playback at other speeds judders. This is not specific to one device: the measurements below show it for every video format and speed tested.
+
+**Measured result**: across 41 combinations of video format and speed (24–120 fps, 0.25x–10x, two devices) judged on whether every picture is shown at the rhythm it should have, 1 passes without Bili Extended and 39 pass with it installed; the other 2 are beyond the device decoder's hardware capability. [Scoring](#scoring) | [All 41 results](#test-results)
+
+- Supports Bilibili 9.13.0, 9.17.0, 9.18.0, 9.19.0 and 9.20.0; other versions get only part of the features, see "[Other Bilibili versions](#other-bilibili-versions)" below.
+- Needs a framework that loads modules of the modern Xposed API (libxposed **API 102**), for example LSPosed 2.2.x; Android 7.0 / API 24 or later; 64-bit ARM (`arm64-v8a`) devices only.
 - Root-cause analysis and fix guide for Bilibili's player engineers (in Chinese): [docs/bilibili-fix-guide.md](docs/bilibili-fix-guide.md); the mechanisms added beyond Media3 (phase lock, cadence lock and others) and their measured gains (in Chinese): [docs/beyond-media3.md](docs/beyond-media3.md).
 
 ## Features
@@ -14,34 +18,47 @@ Every setting is changed **inside Bilibili**, in the entry **Bili Extended**, wh
 
 | Group | Setting | What it does |
 |---|---|---|
-| Smoothness | **Video renderer** (`Texture` / `Surface external` / `Surface`) | Which renderer the video-detail player uses. **`Surface external` is recommended**: it keeps zoom, rotation and screenshots, and every frame can carry a presentation timestamp. |
-| Smoothness | **Media3 Vsync** (on by default) | Schedules and releases video frames with timestamps the way Media3 (ExoPlayer) does, at every speed: frames are handed over a fixed time ahead at 1x, picked with a cadence lock at higher speeds, and late frames are skipped by rule. |
-| Smoothness | **Threshold before the planned presentation** (default 33 ms) | A frame is not handed over while it is still more than this ahead of its planned presentation; 1–50 ms. |
-| Smoothness | **How late behind the audio a frame may be dropped** (default 30 ms) | A frame may be dropped only when it is later than this behind the audio; 1–50 ms. |
+| Smoothness | **Video renderer** (`Texture` / `Surface external` / `Surface`) | Which renderer the video-detail player uses; the default is `Surface external`. **`Surface external` is recommended**: it keeps zoom, rotation and screenshots, and the display time of every picture can be set. |
+| Smoothness | **Media3 Vsync** (on by default) | The core feature: every picture is aligned with the screen refresh before it is sent out, at every speed. The method comes from Android's official player, Media3 (ExoPlayer). Off means no such alignment. |
+| Smoothness | **Threshold before the planned presentation** (default 33 ms) | Advanced: how far ahead of its display time a picture may be handed to the system at the earliest; 1–50 ms, normally left alone. |
+| Smoothness | **How late behind the audio a frame may be dropped** (default 30 ms) | Advanced: a picture is skipped to catch up with the audio only when it is later than this behind the audio; 1–50 ms, normally left alone. |
 | Smoothness | **Surface for HDR videos** (on by default) | HDR videos switch to the direct `Surface` so the HDR metadata reaches the display (the external renderer turns HDR into SDR). |
-| Smoothness | **Native-resolution output** (off by default; shown only on screens whose panel resolution is higher than the UI's) | The video goes to the display hardware at the panel's native resolution; the rest of the UI keeps its size. |
-| Speed | **High speeds (up to 10x)** | Lifts the playback core's speed limit and turns the full-screen speed menu into a vertical slider: 20 stops from 0.1x to 10x (0.1, 0.25, 0.33, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0–10.0), applied when the finger lifts. High speeds of high-frame-rate or 4K videos can exceed the decoder. |
+| Smoothness | **Native-resolution output** (off by default; shown only on screens whose panel resolution is higher than the UI's) | The video goes to the display hardware at the panel's native resolution; the rest of the UI keeps its size. Meant for devices such as Sony's 4K phones, whose panel is 4K while the UI is drawn at 1080p: verified on the Xperia XZ Premium, where the video layer is output at 3840×2160 with it on (1920×1080 with it off). Needs `Surface external` or `Surface`; it has no effect with `Texture`. |
+| Speed | **High speeds (up to 10x)** | Lifts the playback core's speed limit and turns the full-screen speed menu into a vertical slider: 20 stops from 0.1x to 10x (0.1, 0.25, 0.33, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0–10.0), applied when the finger lifts. At high speeds, high-frame-rate or 4K videos can exceed what the device can decode, and the picture falls behind. |
 | Speed | **Long-press speed** | 2–10x (in 0.5x steps); Bilibili's 3x when not changed. |
-| Info overlay | **fps overlay** | Shows `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext`: Media3 Vsync state, average fps, 1% low and renderer. |
-| Info overlay | **Video / audio format** | The video format the decoder confirmed and the selected audio format (e.g. `HEVC \| Hi-Res 96KHz`). |
+| Info overlay | **fps overlay** (off by default) | Shows, over the video, `On \| Avg 120fps \| 1%Low 83fps \| Surface Ext`: Media3 Vsync state, average fps, 1% low and renderer. |
+| Info overlay | **Video / audio format** (off by default) | Shows, over the video, the video and audio formats actually being played (e.g. `HEVC \| Hi-Res 96KHz`). |
 | Info overlay | **Position and font size** | Horizontal / vertical position of the overlay (one pair for landscape, one for portrait) and its font size. |
-| Audio | **Pick the best audio quality** | Picks the highest-bandwidth track when separate DASH audio tracks exist. |
-| Page behaviour | **Open vertical Story videos in the normal video page** | Re-routes `bilibili://story` links to the normal video page. |
+| Audio | **Pick the best audio quality** (off by default) | When a video offers several audio tracks, picks the one with the highest bitrate. |
+| Page behaviour | **Open vertical Story videos in the normal video page** (off by default) | Videos that would open in the vertical short-video (Story) player open in the normal video page instead. |
 | Updates | **Check for updates automatically** (on by default) | When Bilibili starts, asks GitHub for a newer release (at most once every 24 hours) and offers it: open the download page, skip this version or remind later; "Check now" in the panel checks right away. |
 
-The module also disables, by default, the performance sampling built into Bilibili's player: it shares the thread that delivers new-frame notifications, and each sample freezes the picture for 80–144 ms (see section B.5 of the fix guide).
+Bili Extended also disables, by default, the performance statistics built into Bilibili's player: they run every 30 seconds and, while running, occupy the thread that delivers new pictures, freezing the picture for 80–144 ms (see section B.5 of the fix guide).
 
-Settings live only in Bilibili's own folder (`files/bilisurfacebridge/settings.txt`); the module app keeps no settings. The module writes only non-sensitive state to the log and never reads account data, cookies, video URLs or playback authorization values.
+Settings live only in Bilibili's own folder (`files/bilisurfacebridge/settings.txt`); Bili Extended's own app keeps no settings. Bili Extended writes only non-sensitive state to the log and never reads account data, cookies, video URLs or playback authorization values.
+
+### Other Bilibili versions
+
+- **Features that need the native hooks**: Media3 Vsync (frame scheduling) and the speed-limit lift. The native hooks first check the IJK library's signatures and stay off when they do not match; Bilibili then behaves as it does without the module.
+- **Everything else** (renderer choice, info overlays, audio-track selection, Story re-routing, update check and so on) is hooked in Java and is not subject to that check, but it has not been tested on versions not listed above and is not guaranteed to work there.
 
 ## Installation
 
-1. Download and install the module APK from [GitHub Releases](https://github.com/XPRAMT/BiliExtended/releases), enable it in LSPosed and select only Bilibili as its scope.
+1. Download `BiliExtended-<version>.apk` (about 2 MB) from [GitHub Releases](https://github.com/XPRAMT/BiliExtended/releases) and install it, enable it in LSPosed and select only Bilibili as its scope.
 2. Force-stop and reopen Bilibili, play a normal video, and open **Bili Extended** from the player menu to change the settings.
 3. Later module updates need no Bilibili restart: install the new version even during playback (hot reload).
 
-Rootless NPatch / LSPatch: tested with versions before 1.4.0; this API 102 version has not been tested with either.
+Rootless NPatch / LSPatch: tested with versions before 1.4.0; for this API 102 version only loading under LSPatch (JingMatrix v1.2-487) has been confirmed, its features have not been fully tested; NPatch has not been tested.
+
+## Troubleshooting
+
+- **Check that the module is active**: the **Bili Extended** entry in the player menu means the module is loaded. With the "fps overlay" turned on in the panel, the actual frame rate is shown during playback; the leading `On` / `Off` is the state of the Media3 Vsync switch. Whether the native hooks were installed is in the log (see "Reporting a problem" below).
+- **Bili Extended is missing from the player menu**: check, in this order, that (1) the module is enabled in LSPosed with Bilibili in its scope; (2) Bilibili was force-stopped and reopened after installing or enabling it; (3) the framework supports libxposed API 102 (for example LSPosed 2.2.x); (4) Bilibili is one of the supported versions listed above; (5) the device is 64-bit ARM.
+- **Reporting a problem**: open an [issue](https://github.com/XPRAMT/BiliExtended/issues) with the device model, Android version, Bilibili version, module version and framework version, plus the module's log: the module log in the LSPosed manager, or `adb logcat -s BiliExtended`.
 
 ## Scoring
+
+Below are the complete rules that decide pass or fail, followed by all 41 results. In the table "original" is the official app's own playback and "module" is with Bili Extended installed; the test conditions of both are in "Test results".
 
 Each round records 15 s with root Perfetto in full-screen playback and looks only at the actual presentation times of the video layer in SurfaceFlinger.
 
