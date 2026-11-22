@@ -49,6 +49,15 @@ public class DexScanTest {
         return result;
     }
 
+    /** Class names as found on the tablet on 2026-11-22 (module log of the running 9.20.0). */
+    @Test
+    public void bilibili920() throws Exception {
+        DexScan.Result result = scan("bili-9.20.0/base.apk");
+        assertTrue(result.get(DexScan.SPEED_MENU).contains("u6c2"));
+        assertTrue(result.get(DexScan.SPEED_ADAPTER).contains("xzi2"));
+        assertTrue(result.get(DexScan.SETTINGS_ADAPTER).contains("com.bilibili.app.gemini.ui.e"));
+    }
+
     @Test
     public void bilibili919() throws Exception {
         DexScan.Result result = scan("bili-9.19.0/base.apk");
